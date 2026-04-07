@@ -1,0 +1,14 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+environs = "~=8.0.0"
+aiogram = "==2.25.2"
+marshmallow = "<4"
+
+[dev-packages]
+
+[requires]
+python_version = "3.11"
