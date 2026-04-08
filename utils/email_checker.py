@@ -9,10 +9,10 @@ from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 from aiogram import Bot
-from aiogram.types import InputFile, InputMediaVideo
+from aiogram.types import InputFile
 
 from data import config
-from utils.motive import MotiveClient
+from utils.motive import MotiveClient, extract_event_id
 
 logger = logging.getLogger(__name__)
 
@@ -122,11 +122,18 @@ def _normalize_time(time_str: str) -> str:
     return time_str.strip() if time_str else "—"
 
 
-def _extract_video_url(soup: BeautifulSoup) -> str | None:
-    """Returns URL if 'Watch Now' link exists, None if video not available."""
-    for a in soup.find_all("a", href=True):
-        if "watch" in a.get_text(strip=True).lower():
-            return a["href"]
+def _extract_mandrill_url(msg: email.message.Message) -> str | None:
+    """Extract the Mandrill tracking URL (View Details link) from the plain-text part."""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                payload = part.get_payload(decode=True)
+                if payload:
+                    text = payload.decode(errors="replace")
+                    for line in text.splitlines():
+                        line = line.strip()
+                        if line.startswith("View Details at "):
+                            return line.replace("View Details at ", "").strip()
     return None
 
 
@@ -152,8 +159,8 @@ def parse_safety_email(msg: email.message.Message) -> dict:
         "avg_speed":   _find_field(lines, "AVERAGE SPEED"),
         "max_over":    _find_field(lines, "MAX OVER POSTED"),
         "speed_limit": _find_field(lines, "SPEED LIMIT"),
-        # Video
-        "has_video":  _extract_video_url(soup) is not None,
+        # Event ID for video lookup
+        "event_id":   extract_event_id(_extract_mandrill_url(msg) or ""),
         "pdf":        _extract_pdf(msg),
     }
 
@@ -277,58 +284,39 @@ def format_message(data: dict) -> str:
 motive_client = MotiveClient(config.MOTIVE_API_KEY)
 
 
-async def _get_videos(vehicle: str, event_utc: str) -> list[bytes]:
-    """Request video recall from Motive and download all camera videos."""
+async def _get_video(event_id: str) -> bytes | None:
+    """Fetch video clip for an event ID directly from Motive API."""
     try:
-        logger.info(f"[video] requesting recall for vehicle={vehicle} at {event_utc}")
-        video_urls = await motive_client.request_video_recall(vehicle, event_utc)
-        if not video_urls:
-            return []
-        videos = []
-        for url in video_urls:
-            data = await motive_client.download_video(url)
-            if data:
-                videos.append(data)
-        logger.info(f"[video] downloaded {len(videos)} video(s)")
-        return videos
+        video_url = await motive_client.get_event_video_url(event_id)
+        if not video_url:
+            return None
+        return await motive_client.download_video(video_url)
     except Exception as e:
         logger.error(f"Video fetch error: {e}")
-        return []
+        return None
 
 
 async def process_email(bot: Bot, msg: email.message.Message):
     data = parse_safety_email(msg)
     text = format_message(data)
 
-    # Download videos if available and we have the event timestamp
-    videos: list[bytes] = []
-    if data["has_video"] and data["event_utc"] and data["vehicle"] != "—":
-        videos = await _get_videos(data["vehicle"], data["event_utc"])
+    video: bytes | None = None
+    if data["event_id"]:
+        logger.info(f"Fetching video for event {data['event_id']}")
+        video = await _get_video(data["event_id"])
 
     # Send PDF if present (crash report)
     if data["pdf"]:
         pdf_file = InputFile(io.BytesIO(data["pdf"]), filename="collision_report.pdf")
         await bot.send_document(config.GROUP_CHAT_ID, pdf_file, caption="📄 Collision Report")
 
-    if videos:
-        if len(videos) == 1:
-            await bot.send_video(
-                config.GROUP_CHAT_ID,
-                InputFile(io.BytesIO(videos[0]), filename="alert.mp4"),
-                caption=text,
-                parse_mode="HTML",
-            )
-        else:
-            # Send text first, then media group with all videos
-            await bot.send_message(config.GROUP_CHAT_ID, text, parse_mode="HTML")
-            media = [
-                InputMediaVideo(
-                    InputFile(io.BytesIO(v), filename=f"video_{i+1}.mp4"),
-                    caption="Front camera" if i == 0 else "Interior camera",
-                )
-                for i, v in enumerate(videos)
-            ]
-            await bot.send_media_group(config.GROUP_CHAT_ID, media)
+    if video:
+        await bot.send_video(
+            config.GROUP_CHAT_ID,
+            InputFile(io.BytesIO(video), filename="alert.mp4"),
+            caption=text,
+            parse_mode="HTML",
+        )
     else:
         await bot.send_message(config.GROUP_CHAT_ID, text, parse_mode="HTML")
 

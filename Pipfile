@@ -7,10 +7,10 @@ name = "pypi"
 environs = "~=8.0.0"
 aiogram = "==2.25.2"
 marshmallow = "<4"
-beautifulsoup4 = "*"
-aiohttp = "*"
 aiofiles = "*"
 tzdata = "*"
+aiohttp = "*"
+beautifulsoup4 = "*"
 
 [dev-packages]
 
