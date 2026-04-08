@@ -18,3 +18,6 @@ MOTIVE_API_KEY = env.str("MOTIVE_API_KEY")
 
 # Telegram group to send alerts
 GROUP_CHAT_ID = env.int("GROUP_CHAT_ID")
+
+# PostgreSQL
+DATABASE_URL = env.str("DATABASE_URL")

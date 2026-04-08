@@ -117,9 +117,9 @@ def _normalize_time(time_str: str) -> str:
     dt_utc = _parse_event_time(time_str)
     if dt_utc:
         eastern = dt_utc.astimezone(ZoneInfo("America/New_York"))
-        return eastern.strftime("%b %d, %I:%M %p ET")
+        return eastern.strftime("%b %d, %I:%M %p %Z")
     # Fallback: already Eastern or unknown
-    return time_str.strip().replace(" EDT", " ET").replace(" EST", " ET") if time_str else "—"
+    return time_str.strip() if time_str else "—"
 
 
 def _extract_video_url(soup: BeautifulSoup) -> str | None:
