@@ -101,7 +101,7 @@ def _format_event(event: dict) -> str:
     lines = [f"{emoji} <b>{title}</b>\n"]
     lines.append(f"🚛 <b>Vehicle:</b> <code>{vehicle}</code>")
     lines.append(f"👤 <b>Driver:</b> {driver}")
-    if sev_display:
+    if sev_display and event_type not in {"driver_facing_cam_obstruction", "road_facing_cam_obstruction"}:
         sev_emoji = SEVERITY_EMOJI.get(sev_display.lower(), "⚠️")
         lines.append(f"📊 <b>Severity:</b> {sev_emoji} {sev_display.title()}")
     lines.append(f"🕐 <b>Time:</b> {start_time}")
@@ -237,10 +237,6 @@ async def motive_webhook(request: web.Request) -> web.Response:
         if isinstance(body, list) and all(isinstance(i, str) for i in body):
             logger.info(f"Webhook verification ping: {body}")
             return web.Response(text="OK", status=200)
-
-        print("=== WEBHOOK RECEIVED ===")
-        print(json.dumps(body, indent=2, default=str))
-        print("========================")
 
         items = body if isinstance(body, list) else [body]
 
