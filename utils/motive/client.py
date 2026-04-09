@@ -52,7 +52,8 @@ class MotiveClient:
 
     async def download_video(self, video_url: str) -> bytes | None:
         try:
-            async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=300)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(video_url) as resp:
                     if resp.status == 200:
                         return await resp.read()
