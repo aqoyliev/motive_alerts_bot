@@ -1,5 +1,4 @@
 import asyncio
-import io
 import json
 import logging
 from datetime import datetime
@@ -7,15 +6,12 @@ from zoneinfo import ZoneInfo
 
 from aiohttp import web
 from aiogram import Bot
-from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
+from aiogram.types import InputMediaVideo, InputMediaPhoto
 
 from data import config
-from utils.motive import MotiveClient
 from utils.db_api.companies import get_groups_for_event
 
 logger = logging.getLogger(__name__)
-
-motive_client = MotiveClient(config.MOTIVE_API_KEY)
 
 SEVERITY_EMOJI = {
     "low": "🟢",
@@ -146,7 +142,7 @@ def _get_camera_media_info(event: dict) -> tuple[list[str], list[str]]:
 
 
 async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
-    """Filter → format → fetch video → send to Telegram."""
+    """Filter → format → send to Telegram (URLs sent directly, no download)."""
     try:
         event_type = _get_event_type(event)
         event_id = event.get("id", "?")
@@ -163,68 +159,28 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
             return
 
         text = _format_event(event)
-        vehicle = _get_vehicle(event)
-        start_time = event.get("start_time", "")
-
         video_urls, image_urls = _get_camera_media_info(event)
 
         if event.get("camera_media") is None and event_type != "speeding":
             text += "\n\n📷 <i>No camera media available</i>"
 
-        videos = []
-        for url in video_urls:
-            data = await motive_client.download_video(url)
-            if data:
-                videos.append(data)
-
         for chat_id in group_ids:
-            if videos:
-                if len(videos) == 1:
-                    await bot.send_video(
-                        chat_id,
-                        InputFile(io.BytesIO(videos[0]), filename="alert.mp4"),
-                        caption=text,
-                        parse_mode="HTML",
-                    )
+            if video_urls:
+                if len(video_urls) == 1:
+                    await bot.send_video(chat_id, video_urls[0], caption=text, parse_mode="HTML")
                 else:
                     media = [
-                        InputMediaVideo(
-                            InputFile(io.BytesIO(videos[0]), filename="video_1.mp4"),
-                            caption=text,
-                            parse_mode="HTML",
-                        )
-                    ] + [
-                        InputMediaVideo(InputFile(io.BytesIO(v), filename=f"video_{i+2}.mp4"))
-                        for i, v in enumerate(videos[1:])
-                    ]
+                        InputMediaVideo(video_urls[0], caption=text, parse_mode="HTML")
+                    ] + [InputMediaVideo(url) for url in video_urls[1:]]
                     await bot.send_media_group(chat_id, media)
             elif image_urls:
-                images = []
-                for url in image_urls:
-                    data = await motive_client.download_video(url)
-                    if data:
-                        images.append(data)
-                if len(images) == 1:
-                    await bot.send_photo(
-                        chat_id,
-                        InputFile(io.BytesIO(images[0]), filename="alert.jpg"),
-                        caption=text,
-                        parse_mode="HTML",
-                    )
-                elif images:
-                    media = [
-                        InputMediaPhoto(
-                            InputFile(io.BytesIO(images[0]), filename="photo_1.jpg"),
-                            caption=text,
-                            parse_mode="HTML",
-                        )
-                    ] + [
-                        InputMediaPhoto(InputFile(io.BytesIO(img), filename=f"photo_{i+2}.jpg"))
-                        for i, img in enumerate(images[1:])
-                    ]
-                    await bot.send_media_group(chat_id, media)
+                if len(image_urls) == 1:
+                    await bot.send_photo(chat_id, image_urls[0], caption=text, parse_mode="HTML")
                 else:
-                    await bot.send_message(chat_id, text, parse_mode="HTML")
+                    media = [
+                        InputMediaPhoto(image_urls[0], caption=text, parse_mode="HTML")
+                    ] + [InputMediaPhoto(url) for url in image_urls[1:]]
+                    await bot.send_media_group(chat_id, media)
             else:
                 await bot.send_message(chat_id, text, parse_mode="HTML")
 
