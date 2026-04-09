@@ -2,4 +2,3 @@ aiogram~=2.14
 environs~=8.0.0
 asyncpg~=0.29
 aiohttp~=3.9
-beautifulsoup4~=4.12
