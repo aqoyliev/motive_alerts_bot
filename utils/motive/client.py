@@ -1,51 +1,63 @@
 import aiohttp
-from datetime import datetime, timezone
-from data import config
+import base64
+import json
+import logging
+import urllib.parse
 
-BASE_URL = "https://api.gomotive.com/v1"
+logger = logging.getLogger(__name__)
+
+MOTIVE_API = "https://api.gomotive.com/v1"
 
 
-async def fetch_safety_events(start_time: str, end_time: str = None, per_page: int = 50) -> list:
-    """
-    Fetch safety events from GoMotive API.
-    start_time / end_time: ISO 8601 strings, e.g. "2024-01-01T00:00:00Z"
-    Returns a flat list of safety event dicts.
-    """
-    if end_time is None:
-        end_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def extract_event_id(mandrill_url: str) -> str | None:
+    """Decode a Mandrill tracking URL and return the GoMotive event ID."""
+    try:
+        parsed = urllib.parse.urlparse(mandrill_url)
+        p = urllib.parse.parse_qs(parsed.query).get("p", [None])[0]
+        if not p:
+            return None
+        outer = json.loads(base64.b64decode(p + "==").decode())
+        inner = json.loads(outer["p"])
+        url = inner.get("url", "")
+        parts = url.rstrip("/").split("/")
+        return parts[-1] if parts[-1].isdigit() else None
+    except Exception as e:
+        logger.warning(f"Could not extract event ID from URL: {e}")
+        return None
 
-    headers = {
-        "X-Api-Key": config.MOTIVE_API_KEY,
-        "Accept": "application/json",
-    }
 
-    params = {
-        "start_time": start_time,
-        "end_time": end_time,
-        "per_page": per_page,
-        "page_no": 1,
-    }
+class MotiveClient:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self._headers = {"X-Api-Key": api_key, "Accept": "application/json"}
 
-    all_events = []
+    async def get_event_video_url(self, event_id: str) -> str | None:
+        """Fetch safety event by ID and return video clip URL if available."""
+        try:
+            async with aiohttp.ClientSession(headers=self._headers) as s:
+                async with s.get(f"{MOTIVE_API}/safety_events/{event_id}") as r:
+                    if r.status != 200:
+                        logger.warning(f"Safety event {event_id} returned HTTP {r.status}")
+                        return None
+                    data = await r.json()
+                    event = data.get("safety_event", data)
+                    clip = event.get("video_clip") or {}
+                    url = clip.get("url") or clip.get("download_url")
+                    if url:
+                        logger.info(f"Video clip found for event {event_id}")
+                    return url
+        except Exception as e:
+            logger.error(f"get_event_video_url error: {e}")
+            return None
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        while True:
-            async with session.get(f"{BASE_URL}/safety_events", params=params) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    raise Exception(f"GoMotive API error {resp.status}: {text}")
-
-                data = await resp.json()
-                events = data.get("safety_events", [])
-                all_events.extend(events)
-
-                pagination = data.get("pagination", {})
-                total_pages = pagination.get("total", 1)
-                current_page = params["page_no"]
-
-                if current_page >= total_pages or not events:
-                    break
-
-                params["page_no"] += 1
-
-    return all_events
+    async def download_video(self, video_url: str) -> bytes | None:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(video_url) as resp:
+                    if resp.status == 200:
+                        return await resp.read()
+                    logger.error(f"Video download failed: HTTP {resp.status}")
+                    return None
+        except Exception as e:
+            logger.error(f"Video download error: {e}")
+            return None

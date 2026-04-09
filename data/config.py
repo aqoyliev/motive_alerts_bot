@@ -9,10 +9,6 @@ BOT_TOKEN = env.str("BOT_TOKEN")
 ADMINS = env.list("ADMINS")
 IP = env.str("ip")
 
-# Gmail IMAP
-GMAIL_USER = env.str("GMAIL_USER")
-GMAIL_PASS = env.str("GMAIL_PASS")
-
 # Motive API key (Dashboard → Settings → API → Generate API Key)
 MOTIVE_API_KEY = env.str("MOTIVE_API_KEY")
 

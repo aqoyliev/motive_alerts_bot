@@ -11,6 +11,7 @@ from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
 
 from data import config
 from utils.motive import MotiveClient
+from utils.db_api.companies import get_groups_for_event
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +145,7 @@ def _get_camera_media_info(event: dict) -> tuple[list[str], list[str]]:
     return video_urls, image_urls
 
 
-async def _handle_event(bot: Bot, event: dict):
+async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
     """Filter → format → fetch video → send to Telegram."""
     try:
         event_type = _get_event_type(event)
@@ -155,6 +156,11 @@ async def _handle_event(bot: Bot, event: dict):
             return
 
         logger.info(f"Processing event {event_id} type={event_type}")
+
+        group_ids = await get_groups_for_event(company_slug, event_type)
+        if not group_ids:
+            logger.info(f"No groups configured for company='{company_slug}' event='{event_type}' — skipping")
+            return
 
         text = _format_event(event)
         vehicle = _get_vehicle(event)
@@ -171,56 +177,56 @@ async def _handle_event(bot: Bot, event: dict):
             if data:
                 videos.append(data)
 
-        if videos:
-            if len(videos) == 1:
-                await bot.send_video(
-                    config.GROUP_CHAT_ID,
-                    InputFile(io.BytesIO(videos[0]), filename="alert.mp4"),
-                    caption=text,
-                    parse_mode="HTML",
-                )
-            else:
-                media = [
-                    InputMediaVideo(
-                        InputFile(io.BytesIO(videos[0]), filename="video_1.mp4"),
+        for chat_id in group_ids:
+            if videos:
+                if len(videos) == 1:
+                    await bot.send_video(
+                        chat_id,
+                        InputFile(io.BytesIO(videos[0]), filename="alert.mp4"),
                         caption=text,
                         parse_mode="HTML",
                     )
-                ] + [
-                    InputMediaVideo(InputFile(io.BytesIO(v), filename=f"video_{i+2}.mp4"))
-                    for i, v in enumerate(videos[1:])
-                ]
-                await bot.send_media_group(config.GROUP_CHAT_ID, media)
-        elif image_urls:
-            # Videos not transcoded yet — send photos instead
-            images = []
-            for url in image_urls:
-                data = await motive_client.download_video(url)  # reuse downloader
-                if data:
-                    images.append(data)
-            if len(images) == 1:
-                await bot.send_photo(
-                    config.GROUP_CHAT_ID,
-                    InputFile(io.BytesIO(images[0]), filename="alert.jpg"),
-                    caption=text,
-                    parse_mode="HTML",
-                )
-            elif images:
-                media = [
-                    InputMediaPhoto(
-                        InputFile(io.BytesIO(images[0]), filename="photo_1.jpg"),
+                else:
+                    media = [
+                        InputMediaVideo(
+                            InputFile(io.BytesIO(videos[0]), filename="video_1.mp4"),
+                            caption=text,
+                            parse_mode="HTML",
+                        )
+                    ] + [
+                        InputMediaVideo(InputFile(io.BytesIO(v), filename=f"video_{i+2}.mp4"))
+                        for i, v in enumerate(videos[1:])
+                    ]
+                    await bot.send_media_group(chat_id, media)
+            elif image_urls:
+                images = []
+                for url in image_urls:
+                    data = await motive_client.download_video(url)
+                    if data:
+                        images.append(data)
+                if len(images) == 1:
+                    await bot.send_photo(
+                        chat_id,
+                        InputFile(io.BytesIO(images[0]), filename="alert.jpg"),
                         caption=text,
                         parse_mode="HTML",
                     )
-                ] + [
-                    InputMediaPhoto(InputFile(io.BytesIO(img), filename=f"photo_{i+2}.jpg"))
-                    for i, img in enumerate(images[1:])
-                ]
-                await bot.send_media_group(config.GROUP_CHAT_ID, media)
+                elif images:
+                    media = [
+                        InputMediaPhoto(
+                            InputFile(io.BytesIO(images[0]), filename="photo_1.jpg"),
+                            caption=text,
+                            parse_mode="HTML",
+                        )
+                    ] + [
+                        InputMediaPhoto(InputFile(io.BytesIO(img), filename=f"photo_{i+2}.jpg"))
+                        for i, img in enumerate(images[1:])
+                    ]
+                    await bot.send_media_group(chat_id, media)
+                else:
+                    await bot.send_message(chat_id, text, parse_mode="HTML")
             else:
-                await bot.send_message(config.GROUP_CHAT_ID, text, parse_mode="HTML")
-        else:
-            await bot.send_message(config.GROUP_CHAT_ID, text, parse_mode="HTML")
+                await bot.send_message(chat_id, text, parse_mode="HTML")
 
     except Exception as e:
         logger.error(f"Event handling error: {e}", exc_info=True)
@@ -229,6 +235,7 @@ async def _handle_event(bot: Bot, event: dict):
 async def motive_webhook(request: web.Request) -> web.Response:
     """Receive Motive webhook POST, respond 200 immediately, process async."""
     try:
+        company_slug = request.match_info.get("company", "gurman")
         body = await request.json()
 
         bot: Bot = request.app["bot"]
@@ -250,11 +257,10 @@ async def motive_webhook(request: web.Request) -> web.Response:
                 or item.get("event")
                 or item
             )
-            # Log unrecognized top-level keys to help map payload structures
             event_type = _get_event_type(event)
             if event_type not in ALLOWED_TYPES:
                 logger.info(f"Unhandled event type='{event_type}' keys={list(event.keys())} payload={json.dumps(event, default=str)[:500]}")
-            asyncio.create_task(_handle_event(bot, event))
+            asyncio.create_task(_handle_event(bot, event, company_slug))
 
         return web.Response(text="OK", status=200)
     except Exception as e:
