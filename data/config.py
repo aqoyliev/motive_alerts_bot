@@ -9,9 +9,6 @@ BOT_TOKEN = env.str("BOT_TOKEN")
 ADMINS = env.list("ADMINS")
 IP = env.str("ip")
 
-# Motive API key (Dashboard → Settings → API → Generate API Key)
-MOTIVE_API_KEY = env.str("MOTIVE_API_KEY")
-
 # Telegram group to send alerts
 GROUP_CHAT_ID = env.int("GROUP_CHAT_ID")
 

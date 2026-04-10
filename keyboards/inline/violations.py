@@ -4,8 +4,8 @@ from utils.webhook_handler import EVENT_TYPE_MAP
 
 PERIOD_LABELS = {
     "today": "Today",
-    "week": "This Week",
-    "month": "This Month",
+    "last_week": "Last Week",
+    "last_month": "Last Month",
 }
 
 
@@ -20,32 +20,26 @@ def period_keyboard(company_slug: str) -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=3)
     for key, label in PERIOD_LABELS.items():
         kb.insert(types.InlineKeyboardButton(label, callback_data=f"viol_period:{company_slug}:{key}"))
+    kb.add(types.InlineKeyboardButton("◀ Back", callback_data="viol_bk_co"))
     return kb
 
 
 def event_type_keyboard(company_slug: str, period: str) -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    for etype, (emoji, _) in EVENT_TYPE_MAP.items():
-        kb.insert(types.InlineKeyboardButton(
-            emoji, callback_data=f"viol_etype:{company_slug}:{period}:{etype}"
-        ))
-    kb.add(types.InlineKeyboardButton("All Types ✅", callback_data=f"viol_etype:{company_slug}:{period}:all"))
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("🚨 Speeding", callback_data=f"viol_etype:{company_slug}:{period}:speeding"),
+        types.InlineKeyboardButton("⚠️ Other Violations", callback_data=f"viol_etype:{company_slug}:{period}:other"),
+    )
+    kb.add(types.InlineKeyboardButton("◀ Back", callback_data=f"viol_bk_per:{company_slug}"))
     return kb
 
 
 def top10_keyboard(rows: list[dict], company_slug: str, period: str, event_type: str) -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=1)
-    for row in rows:
-        unit = row["vehicle_number"]
-        total = row["total"]
+    if rows:
         kb.add(types.InlineKeyboardButton(
-            f"🚛 Unit {unit} ({total})",
-            callback_data=f"viol_detail:{company_slug}:{period}:{event_type}:{unit}"
+            "📥 Download Full Report",
+            callback_data=f"viol_dl:{company_slug}:{period}:{event_type}"
         ))
-    return kb
-
-
-def back_to_top10_keyboard(company_slug: str, period: str, event_type: str) -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("◀ Back", callback_data=f"viol_etype:{company_slug}:{period}:{event_type}"))
+    kb.add(types.InlineKeyboardButton("◀ Back", callback_data=f"viol_bk_et:{company_slug}:{period}"))
     return kb
