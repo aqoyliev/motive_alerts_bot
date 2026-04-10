@@ -6,8 +6,18 @@ from loader import dp
 
 @dp.message_handler(CommandHelp())
 async def bot_help(message: types.Message):
-    text = ("Buyruqlar: ",
-            "/start - Botni ishga tushirish",
-            "/help - Yordam")
-    
-    await message.answer("\n".join(text))
+    text = (
+        "📋 <b>Motive Alerts Bot</b>\n",
+        "This bot monitors your fleet and reports safety violations from the GoMotive platform.\n",
+        "<b>Commands:</b>",
+        "/start — Open the main menu",
+        "/help — Show this help message\n",
+        "<b>Violations Report</b>",
+        "From the main menu, tap <b>Violations Report</b> to view top offending units by company.",
+        "• Choose a company",
+        "• Choose <b>Speeding</b> or <b>Other Violations</b>",
+        "• Toggle between <b>Last Week</b> and <b>Last Month</b>",
+        "• Download a full detailed report as a text file\n",
+        "<b>Speeding report note:</b> The download only lists days where a unit had <b>3 or more</b> speeding events.",
+    )
+    await message.answer("\n".join(text), parse_mode="HTML")

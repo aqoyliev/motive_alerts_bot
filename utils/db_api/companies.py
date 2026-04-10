@@ -2,7 +2,7 @@ from utils.db_api import db
 
 
 async def get_all_companies() -> list[dict]:
-    rows = await db.fetch("SELECT id, slug, name FROM companies ORDER BY name")
+    rows = await db.fetch("SELECT id, slug, name FROM companies ORDER BY id")
     return [dict(r) for r in rows]
 
 

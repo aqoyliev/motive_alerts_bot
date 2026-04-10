@@ -267,7 +267,7 @@ async def motive_webhook(request: web.Request) -> web.Response:
             )
             event_type = _get_event_type(event)
             if event_type not in ALLOWED_TYPES:
-                logger.info(f"Unhandled event type='{event_type}' keys={list(event.keys())} payload={json.dumps(event, default=str)[:500]}")
+                logger.debug(f"Unhandled event type='{event_type}' keys={list(event.keys())} payload={json.dumps(event, default=str)[:500]}")
             asyncio.create_task(_handle_event(bot, event, company_slug))
 
         return web.Response(text="OK", status=200)
@@ -282,7 +282,7 @@ async def start_webhook_server(bot: Bot, port: int = 8080):
     app.router.add_post("/webhook/{company}", motive_webhook)
     app.router.add_get("/health", lambda r: web.Response(text="OK"))
 
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
