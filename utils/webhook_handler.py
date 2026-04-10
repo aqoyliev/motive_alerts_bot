@@ -12,6 +12,7 @@ from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
 
 from data import config
 from utils.db_api.companies import get_groups_for_event
+from utils.db_api.violations import save_violation
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,22 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
             return
 
         logger.info(f"Processing event {event_id} type={event_type}")
+
+        # Parse occurred_at
+        occurred_at_str = event.get("start_time") or event.get("created_at") or ""
+        try:
+            occurred_at = datetime.fromisoformat(occurred_at_str.replace("Z", "+00:00"))
+        except Exception:
+            occurred_at = datetime.now()
+
+        vehicle_number = _get_vehicle(event)
+        await save_violation(
+            company_slug=company_slug,
+            vehicle_number=vehicle_number,
+            event_type=event_type,
+            event_id=event.get("id"),
+            occurred_at=occurred_at,
+        )
 
         group_ids = await get_groups_for_event(company_slug, event_type)
         if not group_ids:

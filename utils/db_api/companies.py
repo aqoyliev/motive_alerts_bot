@@ -1,6 +1,11 @@
 from utils.db_api import db
 
 
+async def get_all_companies() -> list[dict]:
+    rows = await db.fetch("SELECT id, slug, name FROM companies ORDER BY name")
+    return [dict(r) for r in rows]
+
+
 async def get_groups_for_event(company_slug: str, event_type: str) -> list[int]:
     """
     Returns telegram_group_ids for the company that should receive this event type.

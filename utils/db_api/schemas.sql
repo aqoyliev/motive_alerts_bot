@@ -50,3 +50,16 @@ CREATE TABLE IF NOT EXISTS admin_subscriptions (
     event_type VARCHAR(50) NOT NULL,
     PRIMARY KEY (admin_id, event_type)
 );
+
+CREATE TABLE IF NOT EXISTS violations (
+    id           BIGSERIAL    PRIMARY KEY,
+    company_slug VARCHAR(50)  NOT NULL,
+    vehicle_number VARCHAR(50) NOT NULL,
+    event_type   VARCHAR(50)  NOT NULL,
+    event_id     BIGINT       UNIQUE,
+    occurred_at  TIMESTAMPTZ  NOT NULL,
+    created_at   TIMESTAMPTZ  DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS violations_company_occurred ON violations (company_slug, occurred_at);
+CREATE INDEX IF NOT EXISTS violations_vehicle ON violations (vehicle_number);

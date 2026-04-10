@@ -11,6 +11,7 @@ aiofiles = "*"
 tzdata = "*"
 aiohttp = "*"
 beautifulsoup4 = "*"
+asyncpg = "*"
 
 [dev-packages]
 
