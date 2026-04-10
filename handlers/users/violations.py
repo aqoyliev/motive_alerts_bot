@@ -62,6 +62,9 @@ async def show_violations_menu(message: types.Message):
 # Company selected
 @dp.callback_query_handler(lambda c: c.data.startswith("viol_company:"))
 async def cb_company(call: types.CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("⛔ Access denied.", show_alert=True)
+        return
     company_slug = call.data.split(":")[1]
     await call.message.edit_text("Select period:", reply_markup=period_keyboard(company_slug))
     await call.answer()
@@ -70,6 +73,9 @@ async def cb_company(call: types.CallbackQuery):
 # Period selected
 @dp.callback_query_handler(lambda c: c.data.startswith("viol_period:"))
 async def cb_period(call: types.CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("⛔ Access denied.", show_alert=True)
+        return
     _, company_slug, period = call.data.split(":")
     await call.message.edit_text(
         "Select event type:",
@@ -81,6 +87,9 @@ async def cb_period(call: types.CallbackQuery):
 # Event type selected → show top 10
 @dp.callback_query_handler(lambda c: c.data.startswith("viol_etype:"))
 async def cb_event_type(call: types.CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("⛔ Access denied.", show_alert=True)
+        return
     parts = call.data.split(":")
     company_slug = parts[1]
     period = parts[2]
@@ -100,6 +109,9 @@ async def cb_event_type(call: types.CallbackQuery):
 # Truck detail
 @dp.callback_query_handler(lambda c: c.data.startswith("viol_detail:"))
 async def cb_detail(call: types.CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("⛔ Access denied.", show_alert=True)
+        return
     parts = call.data.split(":")
     company_slug = parts[1]
     period = parts[2]
