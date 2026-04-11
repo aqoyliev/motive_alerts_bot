@@ -9,6 +9,7 @@ import aiohttp
 from aiohttp import web
 from aiogram import Bot
 from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
+from aiogram.utils.exceptions import NetworkError
 
 from data import config
 from utils.db_api.companies import get_groups_for_event
@@ -200,6 +201,17 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
         videos = [d for d in [await _download(u) for u in video_urls] if d]
 
         for chat_id in group_ids:
+            await _send_with_retry(bot, chat_id, text, videos, image_urls)
+
+    except Exception as e:
+        logger.error(f"Event handling error: {e}", exc_info=True)
+
+
+async def _send_with_retry(bot: Bot, chat_id: int, text: str, videos: list[bytes], image_urls: list[str],
+                            retries: int = 3, delay: float = 5.0):
+    """Send alert to a single chat, retrying on transient network errors."""
+    for attempt in range(1, retries + 1):
+        try:
             if videos:
                 if len(videos) == 1:
                     await bot.send_video(
@@ -235,9 +247,13 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
                     await bot.send_message(chat_id, text, parse_mode="HTML")
             else:
                 await bot.send_message(chat_id, text, parse_mode="HTML")
-
-    except Exception as e:
-        logger.error(f"Event handling error: {e}", exc_info=True)
+            return  # success
+        except NetworkError as e:
+            if attempt < retries:
+                logger.warning(f"NetworkError sending to {chat_id} (attempt {attempt}/{retries}): {e} — retrying in {delay}s")
+                await asyncio.sleep(delay)
+            else:
+                logger.error(f"NetworkError sending to {chat_id} after {retries} attempts: {e}")
 
 
 async def motive_webhook(request: web.Request) -> web.Response:
