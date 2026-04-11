@@ -12,7 +12,7 @@ from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
 from aiogram.utils.exceptions import NetworkError
 
 from data import config
-from utils.db_api.companies import get_groups_for_event
+from utils.db_api.companies import get_groups_for_event, get_company_name
 from utils.db_api.violations import save_violation
 
 logger = logging.getLogger(__name__)
@@ -96,7 +96,7 @@ def _get_vehicle(event: dict) -> str:
     )
 
 
-def _format_event(event: dict) -> str:
+def _format_event(event: dict, company_name: str = "") -> str:
     event_type = _get_event_type(event)
     emoji, title = EVENT_TYPE_MAP.get(event_type, ("🚨", event_type.upper().replace("_", " ")))
 
@@ -114,6 +114,8 @@ def _format_event(event: dict) -> str:
     sev_display = meta_sev or (event.get("severity") or "").strip()
 
     lines = [f"{emoji} <b>{title}</b>\n"]
+    if company_name:
+        lines.append(f"🏢 <b>Company:</b> {company_name}")
     lines.append(f"🚛 <b>Vehicle:</b> <code>{vehicle}</code>")
     lines.append(f"👤 <b>Driver:</b> {driver}")
     if sev_display and event_type not in {"driver_facing_cam_obstruction", "road_facing_cam_obstruction"}:
@@ -199,7 +201,8 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
             logger.info(f"No groups configured for company='{company_slug}' event='{event_type}' — skipping")
             return
 
-        text = _format_event(event)
+        company_display = await get_company_name(company_slug) or company_slug.title()
+        text = _format_event(event, company_display)
         video_urls, image_urls = _get_camera_media_info(event)
 
         if event.get("camera_media") is None and event_type != "speeding":

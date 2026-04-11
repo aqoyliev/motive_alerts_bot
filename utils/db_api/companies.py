@@ -1,6 +1,11 @@
 from utils.db_api import db
 
 
+async def get_company_name(slug: str) -> str | None:
+    row = await db.fetchrow("SELECT name FROM companies WHERE slug = $1", slug)
+    return row["name"] if row else None
+
+
 async def get_all_companies() -> list[dict]:
     rows = await db.fetch("SELECT id, slug, name FROM companies ORDER BY id")
     return [dict(r) for r in rows]
