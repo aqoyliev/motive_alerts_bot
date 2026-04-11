@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS companies (
 
 CREATE TABLE IF NOT EXISTS company_groups (
     id                SERIAL PRIMARY KEY,
-    company_id        INT         NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    company_id        INT         REFERENCES companies(id) ON DELETE CASCADE,  -- NULL = all companies
     telegram_group_id BIGINT      NOT NULL,
     label             VARCHAR(100),
     created_at        TIMESTAMPTZ DEFAULT NOW()
