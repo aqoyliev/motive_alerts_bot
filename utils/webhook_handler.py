@@ -169,6 +169,13 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
             logger.info(f"Ignored event type='{event_type}' id={event_id}")
             return
 
+        if event_type == "speeding":
+            meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
+            sev = meta_sev or (event.get("severity") or "").strip().lower()
+            if sev and sev not in {"critical", "high"}:
+                logger.info(f"Ignored speeding event {event_id} severity='{sev}' (below threshold)")
+                return
+
         logger.info(f"Processing event {event_id} type={event_type}")
 
         # Parse occurred_at
