@@ -48,18 +48,26 @@ async def assign_company(admin_id: int, company_id: int):
     )
 
 
-async def get_subscribed_admins(event_type: str) -> list[int]:
-    """Returns telegram_ids of active admins who want a DM for this event type."""
+async def get_subscribed_admins(event_type: str, company_slug: str) -> list[int]:
+    """Returns telegram_ids of active admins who want a DM for this event type
+    and have access to the given company (super admins get all companies)."""
     rows = await db.fetch(
         """
-        SELECT u.telegram_id
+        SELECT a.telegram_id
         FROM admin_subscriptions sub
         JOIN admins a ON a.id = sub.admin_id
-        JOIN users u ON u.telegram_id = a.telegram_id
+        JOIN companies c ON c.slug = $2
         WHERE a.is_active = TRUE
           AND (sub.event_type = $1 OR sub.event_type = 'all')
+          AND (
+              a.is_super = TRUE
+              OR EXISTS (
+                  SELECT 1 FROM admin_companies ac
+                  WHERE ac.admin_id = a.id AND ac.company_id = c.id
+              )
+          )
         """,
-        event_type,
+        event_type, company_slug,
     )
     return [r["telegram_id"] for r in rows]
 
