@@ -20,6 +20,14 @@ async def is_admin(telegram_id: int, company_id: int | None = None) -> bool:
     return exists is not None
 
 
+async def is_super_admin(telegram_id: int) -> bool:
+    row = await db.fetchrow(
+        "SELECT is_super, is_active FROM admins WHERE telegram_id = $1",
+        telegram_id,
+    )
+    return bool(row and row["is_active"] and row["is_super"])
+
+
 async def add_admin(telegram_id: int, added_by: int | None = None, is_super: bool = False) -> int:
     """Creates an admin record. User must already exist in users table. Returns admin id."""
     return await db.fetchval(

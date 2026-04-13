@@ -6,7 +6,7 @@ from aiogram import types
 from aiogram.utils.exceptions import MessageCantBeEdited, MessageNotModified
 
 from loader import dp
-from utils.db_api.admins import is_admin
+from utils.db_api.admins import is_admin, is_super_admin
 from utils.db_api.companies import get_all_companies
 from utils.db_api.violations import get_top_violators, get_vehicle_events
 from utils.webhook_handler import EVENT_TYPE_MAP
@@ -152,6 +152,7 @@ async def cb_download(call: types.CallbackQuery):
     event_type = parts[3]
 
     await call.answer("Generating report...")
+    super_admin = await is_super_admin(call.from_user.id)
 
     companies = await get_all_companies()
     company_name = next((c["name"] for c in companies if c["slug"] == company_slug), company_slug)
@@ -183,7 +184,10 @@ async def cb_download(call: types.CallbackQuery):
             for e in events:
                 local = e["occurred_at"].astimezone(ET)
                 day = local.strftime("%b %d")
-                by_date.setdefault(day, []).append(local.strftime("%I:%M %p").lstrip("0"))
+                time_str = local.strftime("%I:%M %p").lstrip("0")
+                if super_admin and e.get("severity"):
+                    time_str += f" ({e['severity'].title()})"
+                by_date.setdefault(day, []).append(time_str)
             day_lines = []
             for day, times in by_date.items():
                 if len(times) >= 3:

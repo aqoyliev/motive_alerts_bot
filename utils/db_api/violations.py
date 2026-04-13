@@ -100,7 +100,7 @@ async def get_vehicle_events(company_slug: str, vehicle_number: str, since, unti
 
     rows = await db.fetch(
         f"""
-        SELECT event_type, occurred_at FROM violations
+        SELECT event_type, occurred_at, severity FROM violations
         WHERE company_slug = $1 AND vehicle_number = $2 AND occurred_at >= $3 AND occurred_at < $4
           {type_clause}
         ORDER BY occurred_at DESC
