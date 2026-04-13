@@ -57,10 +57,12 @@ def _format_top10_text(rows: list[dict], period_label: str, company_name: str, e
 
 
 async def _edit_or_send(call: types.CallbackQuery, text: str, reply_markup, parse_mode="HTML"):
-    """Try to edit the existing message; if too old, send a new one."""
+    """Try to edit the existing message; if too old, send a new one; if unchanged, do nothing."""
     try:
         await call.message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
-    except (MessageCantBeEdited, MessageNotModified):
+    except MessageNotModified:
+        pass
+    except MessageCantBeEdited:
         await call.message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
 
 
