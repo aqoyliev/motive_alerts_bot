@@ -14,6 +14,7 @@ from aiogram.utils.exceptions import NetworkError
 from data import config
 from utils.db_api.companies import get_groups_for_event, get_company_name
 from utils.db_api.violations import save_violation
+from utils.db_api.admins import get_subscribed_admins
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,10 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
 
         for chat_id in group_ids:
             await _send_with_retry(bot, chat_id, text, videos, image_urls)
+
+        dm_ids = await get_subscribed_admins(event_type)
+        for telegram_id in dm_ids:
+            await _send_with_retry(bot, telegram_id, text, videos, image_urls)
 
     except Exception as e:
         logger.error(f"Event handling error: {e}", exc_info=True)
