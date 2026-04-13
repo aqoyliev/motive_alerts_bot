@@ -62,3 +62,95 @@ async def get_subscribed_admins(event_type: str) -> list[int]:
         event_type,
     )
     return [r["telegram_id"] for r in rows]
+
+
+async def get_all_admins() -> list[dict]:
+    """Returns all admins joined with user info, ordered by creation date."""
+    rows = await db.fetch(
+        """
+        SELECT a.id, a.telegram_id, a.is_super, a.is_active, a.created_at,
+               u.full_name, u.username
+        FROM admins a
+        JOIN users u ON u.telegram_id = a.telegram_id
+        ORDER BY a.created_at
+        """
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_admin_by_id(admin_id: int) -> dict | None:
+    """Returns a single admin with user info, or None if not found."""
+    row = await db.fetchrow(
+        """
+        SELECT a.id, a.telegram_id, a.is_super, a.is_active, a.created_at,
+               u.full_name, u.username
+        FROM admins a
+        JOIN users u ON u.telegram_id = a.telegram_id
+        WHERE a.id = $1
+        """,
+        admin_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_admin_companies(admin_id: int) -> list[int]:
+    """Returns list of company_ids the admin has been explicitly assigned to."""
+    rows = await db.fetch(
+        "SELECT company_id FROM admin_companies WHERE admin_id = $1",
+        admin_id,
+    )
+    return [r["company_id"] for r in rows]
+
+
+async def set_admin_active(admin_id: int, is_active: bool) -> None:
+    """Activate or deactivate an admin."""
+    await db.execute(
+        "UPDATE admins SET is_active = $2 WHERE id = $1",
+        admin_id, is_active,
+    )
+
+
+async def delete_admin(admin_id: int) -> None:
+    """Permanently remove an admin record."""
+    await db.execute("DELETE FROM admins WHERE id = $1", admin_id)
+
+
+async def revoke_company(admin_id: int, company_id: int) -> None:
+    """Remove an admin's access to a specific company."""
+    await db.execute(
+        "DELETE FROM admin_companies WHERE admin_id = $1 AND company_id = $2",
+        admin_id, company_id,
+    )
+
+
+async def get_admin_subscriptions(telegram_id: int) -> list[str]:
+    """Returns list of event_types the admin is subscribed to for personal DMs."""
+    rows = await db.fetch(
+        """
+        SELECT sub.event_type
+        FROM admin_subscriptions sub
+        JOIN admins a ON a.id = sub.admin_id
+        WHERE a.telegram_id = $1
+        """,
+        telegram_id,
+    )
+    return [r["event_type"] for r in rows]
+
+
+async def toggle_subscription(telegram_id: int, event_type: str) -> None:
+    """Toggle a personal DM subscription for an event type. Adds if absent, removes if present."""
+    admin_id = await db.fetchval("SELECT id FROM admins WHERE telegram_id = $1", telegram_id)
+    exists = await db.fetchval(
+        "SELECT 1 FROM admin_subscriptions WHERE admin_id = $1 AND event_type = $2",
+        admin_id, event_type,
+    )
+    if exists:
+        await db.execute(
+            "DELETE FROM admin_subscriptions WHERE admin_id = $1 AND event_type = $2",
+            admin_id, event_type,
+        )
+    else:
+        await db.execute(
+            "INSERT INTO admin_subscriptions (admin_id, event_type) VALUES ($1, $2)",
+            admin_id, event_type,
+        )
