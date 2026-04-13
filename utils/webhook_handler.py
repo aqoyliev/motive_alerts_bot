@@ -186,12 +186,15 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
             occurred_at = datetime.now()
 
         vehicle_number = _get_vehicle(event)
+        meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
+        severity = meta_sev or (event.get("severity") or "").strip().lower() or None
         await save_violation(
             company_slug=company_slug,
             vehicle_number=vehicle_number,
             event_type=event_type,
             event_id=event.get("id"),
             occurred_at=occurred_at,
+            severity=severity,
         )
 
         group_ids = await get_groups_for_event(company_slug, event_type)

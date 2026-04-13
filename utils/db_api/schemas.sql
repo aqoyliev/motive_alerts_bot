@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS violations (
     vehicle_number VARCHAR(50) NOT NULL,
     event_type   VARCHAR(50)  NOT NULL,
     event_id     BIGINT       UNIQUE,
+    severity     VARCHAR(20),
     occurred_at  TIMESTAMPTZ  NOT NULL,
     created_at   TIMESTAMPTZ  DEFAULT NOW()
 );

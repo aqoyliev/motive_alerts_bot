@@ -2,14 +2,14 @@ from utils.db_api import db
 
 
 async def save_violation(company_slug: str, vehicle_number: str, event_type: str,
-                         event_id: int | None, occurred_at) -> None:
+                         event_id: int | None, occurred_at, severity: str | None = None) -> None:
     await db.execute(
         """
-        INSERT INTO violations (company_slug, vehicle_number, event_type, event_id, occurred_at)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO violations (company_slug, vehicle_number, event_type, event_id, severity, occurred_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (event_id) DO NOTHING
         """,
-        company_slug, vehicle_number, event_type, event_id, occurred_at,
+        company_slug, vehicle_number, event_type, event_id, severity, occurred_at,
     )
 
 
