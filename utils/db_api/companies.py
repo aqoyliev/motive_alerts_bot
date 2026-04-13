@@ -11,6 +11,31 @@ async def get_all_companies() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_accessible_companies(telegram_id: int) -> list[dict]:
+    """Returns companies the admin can access. Super admins get all; regular admins get assigned ones only."""
+    rows = await db.fetch(
+        """
+        SELECT c.id, c.slug, c.name
+        FROM companies c
+        WHERE EXISTS (
+            SELECT 1 FROM admins a
+            WHERE a.telegram_id = $1
+              AND a.is_active = TRUE
+              AND (
+                  a.is_super = TRUE
+                  OR EXISTS (
+                      SELECT 1 FROM admin_companies ac
+                      WHERE ac.admin_id = a.id AND ac.company_id = c.id
+                  )
+              )
+        )
+        ORDER BY c.id
+        """,
+        telegram_id,
+    )
+    return [dict(r) for r in rows]
+
+
 async def get_groups_for_event(company_slug: str, event_type: str) -> list[int]:
     """
     Returns telegram_group_ids that should receive this event type for the given company.

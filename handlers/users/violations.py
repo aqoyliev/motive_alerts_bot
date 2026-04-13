@@ -7,8 +7,9 @@ from aiogram.utils.exceptions import MessageCantBeEdited, MessageNotModified
 
 from loader import dp
 from utils.db_api.admins import is_admin, is_super_admin
-from utils.db_api.companies import get_all_companies
+from utils.db_api.companies import get_accessible_companies
 from utils.db_api.violations import get_top_violators, get_vehicle_events
+from utils.db_api.companies import get_company_name as _get_company_name
 from utils.webhook_handler import EVENT_TYPE_MAP
 from keyboards.inline.violations import (
     companies_keyboard,
@@ -67,8 +68,7 @@ async def _edit_or_send(call: types.CallbackQuery, text: str, reply_markup, pars
 
 
 async def _show_top10(call: types.CallbackQuery, company_slug: str, period: str, event_type: str):
-    companies = await get_all_companies()
-    company_name = next((c["name"] for c in companies if c["slug"] == company_slug), company_slug)
+    company_name = await _get_company_name(company_slug) or company_slug
     since, until = _period_range(period)
     rows = await get_top_violators(company_slug, since, until=until, event_type=event_type, limit=10)
     text = _format_top10_text(rows, PERIOD_LABELS[period], company_name, event_type)
@@ -82,7 +82,7 @@ async def show_violations_menu(message: types.Message):
     if not await is_admin(message.from_user.id):
         await message.answer("⛔ Access denied.")
         return
-    companies = await get_all_companies()
+    companies = await get_accessible_companies(message.from_user.id)
     if not companies:
         await message.answer("No companies configured.")
         return
@@ -95,7 +95,7 @@ async def cb_back_companies(call: types.CallbackQuery):
     if not await is_admin(call.from_user.id):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
-    companies = await get_all_companies()
+    companies = await get_accessible_companies(call.from_user.id)
     await _edit_or_send(call, "Select a company:", companies_keyboard(companies), parse_mode=None)
     await call.answer()
 
@@ -118,6 +118,10 @@ async def cb_company(call: types.CallbackQuery):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
     company_slug = call.data.split(":")[1]
+    companies = await get_accessible_companies(call.from_user.id)
+    if not any(c["slug"] == company_slug for c in companies):
+        await call.answer("⛔ Access denied.", show_alert=True)
+        return
     await _edit_or_send(call, "Select event type:", event_type_keyboard(company_slug), parse_mode=None)
     await call.answer()
 
@@ -156,8 +160,7 @@ async def cb_download(call: types.CallbackQuery):
     await call.answer("Generating report...")
     super_admin = await is_super_admin(call.from_user.id)
 
-    companies = await get_all_companies()
-    company_name = next((c["name"] for c in companies if c["slug"] == company_slug), company_slug)
+    company_name = await _get_company_name(company_slug) or company_slug
     since, until = _period_range(period)
     rows = await get_top_violators(company_slug, since, until=until, event_type=event_type, limit=50)
 
