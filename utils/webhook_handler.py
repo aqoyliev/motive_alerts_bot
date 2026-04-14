@@ -115,6 +115,8 @@ def _format_event(event: dict, company_name: str = "") -> str:
     sev_display = meta_sev or (event.get("severity") or "").strip()
 
     lines = [f"{emoji} <b>{title}</b>\n"]
+    if company_name:
+        lines.append(company_name)
     lines.append(f"🚛 <b>Vehicle:</b> <code>{vehicle}</code>")
     lines.append(f"👤 <b>Driver:</b> {driver}")
     if sev_display and event_type not in {"driver_facing_cam_obstruction", "road_facing_cam_obstruction"}:
