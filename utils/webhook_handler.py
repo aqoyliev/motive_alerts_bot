@@ -265,6 +265,9 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[s
                 logger.error(f"Upload fallback also failed for {chat_id}: {e}")
         else:
             logger.error(f"Could not download any media for {chat_id}")
+
+        # Last resort: send text only so the alert is never lost
+        await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
         return
 
     # No media — send text only
