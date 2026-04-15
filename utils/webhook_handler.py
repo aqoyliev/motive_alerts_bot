@@ -104,7 +104,12 @@ def _format_event(event: dict, company_name: str = "") -> str:
 
     vehicle = _get_vehicle(event)
     driver_info = event.get("driver") or {}
-    driver = driver_info.get("name") or driver_info.get("username") or "Unidentified"
+    driver = (
+        driver_info.get("name")
+        or f"{driver_info.get('first_name', '')} {driver_info.get('last_name', '')}".strip()
+        or driver_info.get("username")
+        or "Unidentified"
+    )
 
     start_time = _to_et(event.get("start_time", ""))
     location = event.get("location", "")
