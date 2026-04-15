@@ -248,14 +248,7 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[s
                     return MediaType(m, caption=text if i == 0 else None, parse_mode="HTML" if i == 0 else None)
                 await bot.send_media_group(chat_id, [_make(i, s) for i, s in enumerate(sources)])
 
-        # First attempt: send by URL
-        try:
-            await _try_send_group(media_urls)
-            return
-        except (NetworkError, TelegramAPIError) as e:
-            logger.warning(f"URL media group failed for {chat_id}: {e} — downloading and uploading")
-
-        # Fallback: download all files, then send as a group
+        # Download all files, then send as a group
         downloaded = []
         for i, url in enumerate(media_urls):
             data = await _download(url)
