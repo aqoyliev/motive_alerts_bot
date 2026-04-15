@@ -106,12 +106,11 @@ def _format_event(event: dict, company_name: str = "") -> str:
     driver_info = event.get("driver") or event.get("current_driver") or {}
     driver = (
         driver_info.get("name")
-        or f"{driver_info.get('first_name', '')} {driver_info.get('last_name', '')}".strip()
+        or f"{driver_info.get('first_name', '') or driver_info.get('FirstName', '')} "
+           f"{driver_info.get('last_name', '') or driver_info.get('LastName', '')}".strip()
         or driver_info.get("username")
         or "Unidentified"
     )
-    if driver == "Unidentified":
-        logger.info(f"[driver-debug] id={event.get('id')} driver={event.get('driver')} current_driver={event.get('current_driver')}")
 
     start_time = _to_et(event.get("start_time", ""))
     location = event.get("location", "")
@@ -175,9 +174,6 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
     try:
         event_type = _get_event_type(event)
         event_id = event.get("id", "?")
-
-        if company_slug == "usmega":
-            logger.info(f"[usmega] RAW EVENT: {json.dumps(event, default=str)}")
 
         if event_type not in ALLOWED_TYPES:
             logger.info(f"Ignored event type='{event_type}' id={event_id}")
