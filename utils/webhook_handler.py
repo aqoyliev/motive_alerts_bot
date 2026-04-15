@@ -110,6 +110,8 @@ def _format_event(event: dict, company_name: str = "") -> str:
         or driver_info.get("username")
         or "Unidentified"
     )
+    if driver == "Unidentified":
+        logger.info(f"[driver-debug] id={event.get('id')} driver={event.get('driver')} current_driver={event.get('current_driver')}")
 
     start_time = _to_et(event.get("start_time", ""))
     location = event.get("location", "")
