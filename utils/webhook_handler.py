@@ -230,31 +230,41 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[s
     media_urls = video_urls or image_urls or []
     is_video = bool(video_urls)
 
-    # Try sending media (each file separately to avoid send_media_group timeouts)
+    # Try sending media as a group by URL first
     if media_urls:
-        send_fn = bot.send_video if is_video else bot.send_photo
         ext = "mp4" if is_video else "jpg"
-        for i, url in enumerate(media_urls):
-            caption = text if i == 0 else None
-            # First try by URL
-            try:
-                await send_fn(chat_id, url, caption=caption, parse_mode="HTML")
-                continue
-            except (NetworkError, TelegramAPIError) as e:
-                logger.warning(f"URL send failed for {chat_id}: {e} — downloading and uploading")
-            # Fall back: download and upload as file
-            data = await _download(url)
-            if data:
-                try:
-                    await send_fn(
-                        chat_id,
-                        InputFile(io.BytesIO(data), filename=f"media_{i+1}.{ext}"),
-                        caption=caption, parse_mode="HTML",
-                    )
-                except (NetworkError, TelegramAPIError) as e:
-                    logger.error(f"Upload fallback also failed for {chat_id}: {e}")
+        MediaType = InputMediaVideo if is_video else InputMediaPhoto
+
+        async def _try_send_group(sources):
+            """sources: list of str (URL) or bytes (downloaded)."""
+            if len(sources) == 1:
+                src = sources[0]
+                media = InputFile(io.BytesIO(src), filename=f"media_1.{ext}") if isinstance(src, bytes) else src
+                send_fn = bot.send_video if is_video else bot.send_photo
+                await send_fn(chat_id, media, caption=text, parse_mode="HTML")
             else:
-                logger.error(f"Could not download media from {url}")
+                def _make(i, src):
+                    m = InputFile(io.BytesIO(src), filename=f"media_{i+1}.{ext}") if isinstance(src, bytes) else src
+                    return MediaType(m, caption=text if i == 0 else None, parse_mode="HTML" if i == 0 else None)
+                await bot.send_media_group(chat_id, [_make(i, s) for i, s in enumerate(sources)])
+
+        # First attempt: send by URL
+        try:
+            await _try_send_group(media_urls)
+            return
+        except (NetworkError, TelegramAPIError) as e:
+            logger.warning(f"URL media group failed for {chat_id}: {e} — downloading and uploading")
+
+        # Fallback: download all and upload
+        downloaded = [await _download(u) for u in media_urls]
+        if any(downloaded):
+            try:
+                await _try_send_group([d for d in downloaded if d])
+                return
+            except (NetworkError, TelegramAPIError) as e:
+                logger.error(f"Upload fallback also failed for {chat_id}: {e}")
+        else:
+            logger.error(f"Could not download any media for {chat_id}")
         return
 
     # No media — send text only
