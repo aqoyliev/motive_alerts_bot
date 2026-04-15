@@ -255,31 +255,26 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[s
         except (NetworkError, TelegramAPIError) as e:
             logger.warning(f"URL media group failed for {chat_id}: {e} — downloading and uploading")
 
-        # Fallback: download and upload each file individually
-        send_fn = bot.send_video if is_video else bot.send_photo
-        any_sent = False
+        # Fallback: download all files, then send as a group
+        downloaded = []
         for i, url in enumerate(media_urls):
             data = await _download(url)
-            if not data:
+            if data:
+                logger.info(f"Downloaded {len(data)} bytes for media_{i+1}")
+                downloaded.append(data)
+            else:
                 logger.error(f"Download failed for {url}")
-                continue
-            logger.info(f"Downloaded {len(data)} bytes for {url}, uploading to {chat_id}")
-            try:
-                caption = text if (i == 0 and not any_sent) else None
-                await send_fn(
-                    chat_id,
-                    InputFile(io.BytesIO(data), filename=f"media_{i+1}.{ext}"),
-                    caption=caption, parse_mode="HTML",
-                )
-                any_sent = True
-                logger.info(f"Uploaded media_{i+1} to {chat_id}")
-            except (NetworkError, TelegramAPIError) as e:
-                logger.error(f"Upload failed for media_{i+1} to {chat_id}: {e}")
 
-        if not any_sent:
-            # Last resort: text only so the alert is never lost
-            logger.error(f"All media failed for {chat_id}, sending text only")
-            await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
+        if downloaded:
+            try:
+                await _try_send_group(downloaded)
+                return
+            except (NetworkError, TelegramAPIError) as e:
+                logger.error(f"Downloaded media group failed for {chat_id}: {e}")
+
+        # Last resort: text only so the alert is never lost
+        logger.error(f"All media failed for {chat_id}, sending text only")
+        await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
         return
 
     # No media — send text only
