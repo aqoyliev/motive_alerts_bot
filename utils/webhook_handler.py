@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from aiohttp import web
 from aiogram import Bot
-from aiogram.types import InputFile
+from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
 from aiogram.utils.exceptions import NetworkError, TelegramAPIError
 
 from data import config
