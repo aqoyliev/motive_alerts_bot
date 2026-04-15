@@ -174,6 +174,9 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
         event_type = _get_event_type(event)
         event_id = event.get("id", "?")
 
+        if company_slug == "usmega":
+            logger.info(f"[usmega] RAW EVENT: {json.dumps(event, default=str)}")
+
         if event_type not in ALLOWED_TYPES:
             logger.info(f"Ignored event type='{event_type}' id={event_id}")
             return
