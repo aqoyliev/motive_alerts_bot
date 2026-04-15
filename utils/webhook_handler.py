@@ -116,7 +116,7 @@ def _format_event(event: dict, company_name: str = "") -> str:
     sev_display = meta_sev or (event.get("severity") or "").strip()
 
     lines = [f"{emoji} <b>{title}</b>\n"]
-    if company_name:
+    if company_name and event_type == "crash":
         lines.append(company_name)
     lines.append(f"🚛 <b>Vehicle:</b> <code>{vehicle}</code>")
     lines.append(f"👤 <b>Driver:</b> {driver}")
