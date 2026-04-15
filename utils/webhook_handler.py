@@ -1,5 +1,4 @@
 import asyncio
-import io
 import json
 import logging
 from datetime import datetime
@@ -8,7 +7,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from aiohttp import web
 from aiogram import Bot
-from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
+from aiogram.types import InputMediaVideo, InputMediaPhoto
 from aiogram.utils.exceptions import NetworkError
 
 from data import config
@@ -18,19 +17,6 @@ from utils.db_api.admins import get_subscribed_admins
 
 logger = logging.getLogger(__name__)
 
-_download_timeout = aiohttp.ClientTimeout(total=300)
-
-
-async def _download(url: str) -> bytes | None:
-    try:
-        async with aiohttp.ClientSession(timeout=_download_timeout) as s:
-            async with s.get(url) as r:
-                if r.status == 200:
-                    return await r.read()
-                logger.error(f"Download failed HTTP {r.status}: {url}")
-    except Exception as e:
-        logger.error(f"Download error: {e}")
-    return None
 
 SEVERITY_EMOJI = {
     "low": "🟢",
@@ -212,57 +198,48 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
         if event.get("camera_media") is None and event_type != "speeding":
             text += "\n\n📷 <i>No camera media available</i>"
 
-        videos = [d for d in [await _download(u) for u in video_urls] if d]
-
         for chat_id in group_ids:
-            await _send_with_retry(bot, chat_id, text, videos, image_urls)
+            await _send_with_retry(bot, chat_id, text, video_urls, image_urls)
 
         dm_ids = await get_subscribed_admins(event_type, company_slug)
         for telegram_id in dm_ids:
-            await _send_with_retry(bot, telegram_id, text, videos, image_urls)
+            await _send_with_retry(bot, telegram_id, text, video_urls, image_urls)
 
     except Exception as e:
         logger.error(f"Event handling error: {e}", exc_info=True)
 
 
-async def _send_with_retry(bot: Bot, chat_id: int, text: str, videos: list[bytes], image_urls: list[str],
+async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[str], image_urls: list[str],
                             retries: int = 3, delay: float = 5.0):
-    """Send alert to a single chat, retrying on transient network errors."""
+    """Send alert to a single chat using direct URLs, retrying on transient errors."""
     for attempt in range(1, retries + 1):
         try:
-            if videos:
-                if len(videos) == 1:
+            if video_urls:
+                if len(video_urls) == 1:
                     await bot.send_video(
-                        chat_id,
-                        InputFile(io.BytesIO(videos[0]), filename="alert.mp4"),
+                        chat_id, video_urls[0],
                         caption=text, parse_mode="HTML",
                     )
                 else:
                     media = [
-                        InputMediaVideo(InputFile(io.BytesIO(videos[0]), filename="video_1.mp4"), caption=text, parse_mode="HTML")
+                        InputMediaVideo(video_urls[0], caption=text, parse_mode="HTML")
                     ] + [
-                        InputMediaVideo(InputFile(io.BytesIO(v), filename=f"video_{i+2}.mp4"))
-                        for i, v in enumerate(videos[1:])
+                        InputMediaVideo(u) for u in video_urls[1:]
                     ]
                     await bot.send_media_group(chat_id, media)
             elif image_urls:
-                images = [d for d in [await _download(u) for u in image_urls] if d]
-                if len(images) == 1:
+                if len(image_urls) == 1:
                     await bot.send_photo(
-                        chat_id,
-                        InputFile(io.BytesIO(images[0]), filename="alert.jpg"),
+                        chat_id, image_urls[0],
                         caption=text, parse_mode="HTML",
                     )
-                elif images:
+                else:
                     media = [
-                        InputMediaPhoto(InputFile(io.BytesIO(images[0]), filename="photo_1.jpg"), caption=text, parse_mode="HTML")
+                        InputMediaPhoto(image_urls[0], caption=text, parse_mode="HTML")
                     ] + [
-                        InputMediaPhoto(InputFile(io.BytesIO(img), filename=f"photo_{i+2}.jpg"))
-                        for i, img in enumerate(images[1:])
+                        InputMediaPhoto(u) for u in image_urls[1:]
                     ]
                     await bot.send_media_group(chat_id, media)
-                else:
-                    await bot.send_message(chat_id, text, parse_mode="HTML")
             else:
                 await bot.send_message(chat_id, text, parse_mode="HTML")
             return  # success
