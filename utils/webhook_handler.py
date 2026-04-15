@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import logging
 from datetime import datetime
@@ -7,8 +8,8 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from aiohttp import web
 from aiogram import Bot
-from aiogram.types import InputMediaVideo, InputMediaPhoto
-from aiogram.utils.exceptions import NetworkError
+from aiogram.types import InputFile
+from aiogram.utils.exceptions import NetworkError, TelegramAPIError
 
 from data import config
 from utils.db_api.companies import get_groups_for_event, get_company_name
@@ -16,6 +17,20 @@ from utils.db_api.violations import save_violation
 from utils.db_api.admins import get_subscribed_admins
 
 logger = logging.getLogger(__name__)
+
+_download_timeout = aiohttp.ClientTimeout(total=300)
+
+
+async def _download(url: str) -> bytes | None:
+    try:
+        async with aiohttp.ClientSession(timeout=_download_timeout) as s:
+            async with s.get(url) as r:
+                if r.status == 200:
+                    return await r.read()
+                logger.error(f"Download failed HTTP {r.status}: {url}")
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+    return None
 
 
 SEVERITY_EMOJI = {
@@ -195,7 +210,7 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
         text = _format_event(event, company_display)
         video_urls, image_urls = _get_camera_media_info(event)
 
-        if event.get("camera_media") is None and event_type != "speeding":
+        if not video_urls and not image_urls and event.get("camera_media") is None and event_type != "speeding":
             text += "\n\n📷 <i>No camera media available</i>"
 
         for chat_id in group_ids:
@@ -209,40 +224,44 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
         logger.error(f"Event handling error: {e}", exc_info=True)
 
 
-async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[str], image_urls: list[str],
-                            retries: int = 3, delay: float = 5.0):
-    """Send alert to a single chat using direct URLs, retrying on transient errors."""
+async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[str] = None,
+                           image_urls: list[str] = None, retries: int = 3, delay: float = 5.0):
+    """Send alert to a single chat. Tries videos/images by URL; falls back to text+links on failure."""
+    media_urls = video_urls or image_urls or []
+    is_video = bool(video_urls)
+
+    # Try sending media (each file separately to avoid send_media_group timeouts)
+    if media_urls:
+        send_fn = bot.send_video if is_video else bot.send_photo
+        ext = "mp4" if is_video else "jpg"
+        for i, url in enumerate(media_urls):
+            caption = text if i == 0 else None
+            # First try by URL
+            try:
+                await send_fn(chat_id, url, caption=caption, parse_mode="HTML")
+                continue
+            except (NetworkError, TelegramAPIError) as e:
+                logger.warning(f"URL send failed for {chat_id}: {e} — downloading and uploading")
+            # Fall back: download and upload as file
+            data = await _download(url)
+            if data:
+                try:
+                    await send_fn(
+                        chat_id,
+                        InputFile(io.BytesIO(data), filename=f"media_{i+1}.{ext}"),
+                        caption=caption, parse_mode="HTML",
+                    )
+                except (NetworkError, TelegramAPIError) as e:
+                    logger.error(f"Upload fallback also failed for {chat_id}: {e}")
+            else:
+                logger.error(f"Could not download media from {url}")
+        return
+
+    # No media — send text only
     for attempt in range(1, retries + 1):
         try:
-            if video_urls:
-                if len(video_urls) == 1:
-                    await bot.send_video(
-                        chat_id, video_urls[0],
-                        caption=text, parse_mode="HTML",
-                    )
-                else:
-                    media = [
-                        InputMediaVideo(video_urls[0], caption=text, parse_mode="HTML")
-                    ] + [
-                        InputMediaVideo(u) for u in video_urls[1:]
-                    ]
-                    await bot.send_media_group(chat_id, media)
-            elif image_urls:
-                if len(image_urls) == 1:
-                    await bot.send_photo(
-                        chat_id, image_urls[0],
-                        caption=text, parse_mode="HTML",
-                    )
-                else:
-                    media = [
-                        InputMediaPhoto(image_urls[0], caption=text, parse_mode="HTML")
-                    ] + [
-                        InputMediaPhoto(u) for u in image_urls[1:]
-                    ]
-                    await bot.send_media_group(chat_id, media)
-            else:
-                await bot.send_message(chat_id, text, parse_mode="HTML")
-            return  # success
+            await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
+            return
         except NetworkError as e:
             if attempt < retries:
                 logger.warning(f"NetworkError sending to {chat_id} (attempt {attempt}/{retries}): {e} — retrying in {delay}s")
