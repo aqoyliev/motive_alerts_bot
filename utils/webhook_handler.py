@@ -9,7 +9,7 @@ import aiohttp
 from aiohttp import web
 from aiogram import Bot
 from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
-from aiogram.utils.exceptions import NetworkError, TelegramAPIError
+from aiogram.utils.exceptions import NetworkError, TelegramAPIError, RetryAfter
 
 from data import config
 from utils.db_api.companies import get_groups_for_event, get_company_name
@@ -265,15 +265,26 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[s
                 logger.error(f"Download failed for {url}")
 
         if downloaded:
-            try:
-                await _try_send_group(downloaded)
-                return
-            except (NetworkError, TelegramAPIError) as e:
-                logger.error(f"Downloaded media group failed for {chat_id}: {e}")
+            for attempt in range(3):
+                try:
+                    await _try_send_group(downloaded)
+                    return
+                except RetryAfter as e:
+                    logger.warning(f"Flood control (media) for {chat_id}, waiting {e.timeout}s")
+                    await asyncio.sleep(e.timeout + 1)
+                except (NetworkError, TelegramAPIError) as e:
+                    logger.error(f"Downloaded media group failed for {chat_id}: {e}")
+                    break
 
         # Last resort: text only so the alert is never lost
         logger.error(f"All media failed for {chat_id}, sending text only")
-        await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
+        for attempt in range(3):
+            try:
+                await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
+                return
+            except RetryAfter as e:
+                logger.warning(f"Flood control (text) for {chat_id}, waiting {e.timeout}s")
+                await asyncio.sleep(e.timeout + 1)
         return
 
     # No media — send text only
@@ -281,6 +292,9 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[s
         try:
             await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
             return
+        except RetryAfter as e:
+            logger.warning(f"Flood control (text-only) for {chat_id}, waiting {e.timeout}s")
+            await asyncio.sleep(e.timeout + 1)
         except NetworkError as e:
             if attempt < retries:
                 logger.warning(f"NetworkError sending to {chat_id} (attempt {attempt}/{retries}): {e} — retrying in {delay}s")
