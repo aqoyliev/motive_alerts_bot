@@ -272,9 +272,9 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[s
                 except RetryAfter as e:
                     logger.warning(f"Flood control (media) for {chat_id}, waiting {e.timeout}s")
                     await asyncio.sleep(e.timeout + 1)
-                except (NetworkError, TelegramAPIError) as e:
-                    logger.error(f"Downloaded media group failed for {chat_id}: {e}")
-                    break
+                except (TimeoutError, NetworkError, TelegramAPIError) as e:
+                    logger.warning(f"Media send failed for {chat_id} (attempt {attempt+1}/3): {e} — retrying")
+                    await asyncio.sleep(5)
 
         # Last resort: text only so the alert is never lost
         logger.error(f"All media failed for {chat_id}, sending text only")
