@@ -21,7 +21,6 @@ def event_type_keyboard(company_slug: str) -> types.InlineKeyboardMarkup:
         types.InlineKeyboardButton("🚨 Speeding", callback_data=f"viol_etype:{company_slug}:speeding"),
         types.InlineKeyboardButton("⚠️ Other Violations", callback_data=f"viol_etype:{company_slug}:other"),
     )
-    kb.add(types.InlineKeyboardButton("◀ Back", callback_data="viol_bk_co"))
     return kb
 
 

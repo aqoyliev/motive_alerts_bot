@@ -306,7 +306,7 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[s
 async def motive_webhook(request: web.Request) -> web.Response:
     """Receive Motive webhook POST, respond 200 immediately, process async."""
     try:
-        company_slug = request.match_info.get("company", "gurman")
+        company_slug = request.match_info.get("company") or config.COMPANY_SLUG
         body = await request.json()
 
         bot: Bot = request.app["bot"]
@@ -343,6 +343,7 @@ async def start_webhook_server(bot: Bot, port: int = 8080):
     app = web.Application()
     app["bot"] = bot
     app.router.add_post("/webhook/{company}", motive_webhook)
+    app.router.add_post("/webhook", motive_webhook)
     app.router.add_get("/health", lambda r: web.Response(text="OK"))
 
     runner = web.AppRunner(app, access_log=None)

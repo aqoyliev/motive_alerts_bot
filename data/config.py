@@ -14,3 +14,6 @@ GROUP_CHAT_ID = env.int("GROUP_CHAT_ID")
 
 # PostgreSQL
 DATABASE_URL = env.str("DATABASE_URL")
+
+# Single-company mode
+COMPANY_SLUG = env.str("COMPANY_SLUG")
