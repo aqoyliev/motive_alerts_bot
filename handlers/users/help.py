@@ -9,7 +9,7 @@ from utils.db_api.admins import is_super_admin
 async def bot_help(message: types.Message):
     text = [
         "📋 <b>Motive Alerts Bot</b>\n",
-        "This bot monitors your fleet and reports safety violations from the GoMotive platform.\n",
+        "This bot monitors your fleet and reports safety violations.\n",
         "<b>Commands:</b>",
         "/start — Open the main menu",
         "/help — Show this help message\n",

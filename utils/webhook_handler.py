@@ -51,6 +51,7 @@ EVENT_TYPE_MAP = {
     "forward_collision_warning":    ("⚠️", "FORWARD COLLISION WARNING"),
     "unsafe_parking":               ("🅿️", "UNSAFE PARKING"),
     "speeding":                     ("🚨", "SPEEDING OVER POSTED"),
+    "tailgating":                   ("🚗", "TAILGATING"),
 }
 
 # Only process these event types — everything else is ignored
@@ -182,7 +183,7 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
         if event_type == "speeding":
             meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
             sev = meta_sev or (event.get("severity") or "").strip().lower()
-            if sev and sev not in {"critical", "high"}:
+            if sev and sev not in {"critical", "high", "medium"}:
                 logger.info(f"Ignored speeding event {event_id} severity='{sev}' (below threshold)")
                 return
 
