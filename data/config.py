@@ -17,3 +17,5 @@ DATABASE_URL = env.str("DATABASE_URL")
 
 # Single-company mode
 COMPANY_SLUG = env.str("COMPANY_SLUG")
+
+SAMSARA_API_KEY = env.str("SAMSARA_API_KEY", default="")
