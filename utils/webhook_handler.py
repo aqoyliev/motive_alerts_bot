@@ -182,7 +182,8 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
         if event_type == "speeding":
             meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
             sev = meta_sev or (event.get("severity") or "").strip().lower()
-            if sev and sev not in {"critical", "high"}:
+            allowed_severities = {"critical", "high", "medium"} if company_slug == "nur1" else {"critical", "high"}
+            if sev and sev not in allowed_severities:
                 logger.info(f"Ignored speeding event {event_id} severity='{sev}' (below threshold)")
                 return
 
