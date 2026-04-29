@@ -133,7 +133,6 @@ async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict
                 if r.status == 200:
                     data = await r.json()
                     last_data = data
-                    logger.info(f"[samsara] harsh_event API response (attempt {attempt}):\n{json.dumps(data, indent=2)}")
                     harsh_type = data.get("harshEventType") or ""
                     if harsh_type in _IMAGE_ONLY_HARSH_TYPES:
                         logger.info(f"[samsara] '{harsh_type}' is image-only — returning on first response")
@@ -561,7 +560,6 @@ async def samsara_webhook(request: web.Request) -> web.Response:
                 return web.Response(text="Forbidden", status=403)
 
         body = json.loads(body_bytes)
-        logger.info(f"[samsara] webhook body:\n{json.dumps(body, indent=2)}")
         event_id = body.get("eventId") or ""
         if _is_duplicate(event_id):
             logger.info(f"[samsara] Duplicate eventId={event_id} — skipping")
