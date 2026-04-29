@@ -267,6 +267,35 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
     """Filter → format → send to Telegram."""
     company_slug = company_slug or config.COMPANY_SLUG
     try:
+        # Enrich Samsara AlertIncident events: fetch harsh event data (type, location, video)
+        if event.get("_samsara_vehicle_id") and event.get("_samsara_timestamp_ms"):
+            harsh_data = await _fetch_samsara_harsh_event(
+                event["_samsara_vehicle_id"], event["_samsara_timestamp_ms"]
+            )
+            if harsh_data:
+                harsh_type = harsh_data.get("harshEventType") or ""
+                resolved_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "harsh_event")
+                loc = harsh_data.get("location") or {}
+                fwd_url = harsh_data.get("downloadForwardVideoUrl") or ""
+                inward_url = harsh_data.get("downloadInwardVideoUrl") or ""
+                event = {
+                    **event,
+                    "type": resolved_type,
+                    "location": loc.get("address") or "",
+                    "camera_media": {
+                        "available": bool(fwd_url or inward_url),
+                        "downloadable_videos": {
+                            "front_facing_plain_url": fwd_url,
+                            "driver_facing_plain_url": inward_url,
+                        },
+                        "downloadable_images": {},
+                    } if (fwd_url or inward_url) else None,
+                }
+                logger.info(
+                    f"[samsara] enriched: harshType='{harsh_type}' → '{resolved_type}' "
+                    f"loc='{event['location']}' video={'yes' if event['camera_media'] else 'no'}"
+                )
+
         event_type = _get_event_type(event)
         event_id = event.get("id", "?")
 
@@ -469,39 +498,23 @@ async def _parse_samsara(body: dict) -> tuple[str, dict]:
             if parts and parts[-1].isdigit():
                 timestamp_ms = int(parts[-1])
 
-            harsh_data = await _fetch_samsara_harsh_event(vehicle_id, timestamp_ms) if (vehicle_id and timestamp_ms) else None
-            if harsh_data:
-                harsh_type = harsh_data.get("harshEventType") or ""
-                event_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "harsh_event")
-                loc = harsh_data.get("location") or {}
-                location_str = loc.get("address") or ""
-                fwd_url = harsh_data.get("downloadForwardVideoUrl") or ""
-                inward_url = harsh_data.get("downloadInwardVideoUrl") or ""
-                camera_media = {
-                    "available": bool(fwd_url or inward_url),
-                    "downloadable_videos": {
-                        "front_facing_plain_url": fwd_url,
-                        "driver_facing_plain_url": inward_url,
-                    },
-                    "downloadable_images": {},
-                } if (fwd_url or inward_url) else None
-                logger.info(f"[samsara] harsh_event API: '{harsh_type}' → {event_type} loc='{location_str}' video={'yes' if camera_media else 'no'}")
-            else:
-                event_type, location_str, camera_media = "harsh_event", "", None
-
+            # Video fetching is deferred to _handle_event (background task) so the
+            # webhook can respond 200 immediately — Samsara has a short delivery timeout.
             normalized = {
-                "id":                 body.get("eventId"),
-                "type":               event_type,
-                "vehicle":            {"number": vehicle_obj.get("name") or vehicle_id},
-                "driver":             {"name": ""},
-                "start_time":         event_time,
-                "location":           location_str,
-                "nominatim_location": "",
-                "severity":           "",
-                "camera_media":       camera_media,
-                "_source":            "samsara",
+                "id":                    body.get("eventId"),
+                "type":                  "harsh_event",
+                "_samsara_vehicle_id":   vehicle_id,
+                "_samsara_timestamp_ms": timestamp_ms,
+                "vehicle":               {"number": vehicle_obj.get("name") or vehicle_id},
+                "driver":                {"name": ""},
+                "start_time":            event_time,
+                "location":              "",
+                "nominatim_location":    "",
+                "severity":              "",
+                "camera_media":          None,
+                "_source":               "samsara",
             }
-            return event_type, normalized
+            return "harsh_event", normalized
 
         return "", {}
 
