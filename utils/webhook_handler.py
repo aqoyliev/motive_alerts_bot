@@ -76,7 +76,6 @@ EVENT_TYPE_MAP = {
     "drowsy_driving":               ("😴", "POSSIBLE DROWSINESS"),
     "harsh_acceleration":           ("🚀", "HARSH ACCELERATION"),
     "no_seat_belt":                 ("🚫", "NO SEAT BELT"),
-    "obstructed_camera":            ("📷", "OBSTRUCTED CAMERA"),
 }
 
 # Only process these event types — everything else is ignored
@@ -117,11 +116,16 @@ def _verify_hmac(secret: str, body: bytes, provided: str) -> bool:
     )
 
 
+# Harsh event types that never produce a video clip — stop retrying on first 200
+_IMAGE_ONLY_HARSH_TYPES = {"Obstructed Camera", "No Seat Belt"}
+
+
 async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict | None:
-    """Poll harsh event API every 10s (up to 6 attempts) until both video URLs are present."""
+    """Poll harsh event API every 10s. Gives up after 2 consecutive empty responses."""
     url = f"https://api.samsara.com/v1/fleet/vehicles/{vehicle_id}/safety/harsh_event"
     headers = {"Authorization": f"Bearer {config.SAMSARA_API_KEY}"}
     last_data = None
+    empty_attempts = 0
     for attempt in range(1, 13):
         await asyncio.sleep(10)
         try:
@@ -129,11 +133,20 @@ async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict
                 if r.status == 200:
                     data = await r.json()
                     last_data = data
+                    logger.info(f"[samsara] harsh_event API response (attempt {attempt}):\n{json.dumps(data, indent=2)}")
+                    harsh_type = data.get("harshEventType") or ""
+                    if harsh_type in _IMAGE_ONLY_HARSH_TYPES:
+                        logger.info(f"[samsara] '{harsh_type}' is image-only — returning on first response")
+                        return data
                     fwd = data.get("downloadForwardVideoUrl") or ""
                     inward = data.get("downloadInwardVideoUrl") or ""
                     if fwd and inward:
                         logger.info(f"[samsara] Both video URLs ready on attempt {attempt}")
                         return data
+                    empty_attempts += 1
+                    if empty_attempts >= 2:
+                        logger.warning(f"[samsara] No video URLs after {attempt} attempts — giving up")
+                        return last_data
                     logger.info(f"[samsara] Attempt {attempt}/12: fwd={bool(fwd)} inward={bool(inward)} — retrying in 10s")
                 else:
                     body_text = await r.text()
@@ -278,18 +291,35 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
                 loc = harsh_data.get("location") or {}
                 fwd_url = harsh_data.get("downloadForwardVideoUrl") or ""
                 inward_url = harsh_data.get("downloadInwardVideoUrl") or ""
-                event = {
-                    **event,
-                    "type": resolved_type,
-                    "location": loc.get("address") or "",
-                    "camera_media": {
-                        "available": bool(fwd_url or inward_url),
+                fwd_img = harsh_data.get("downloadForwardImageUrl") or ""
+                inward_img = harsh_data.get("downloadInwardImageUrl") or ""
+                has_video = bool(fwd_url or inward_url)
+                has_image = bool(fwd_img or inward_img)
+                if has_video:
+                    camera_media = {
+                        "available": True,
                         "downloadable_videos": {
                             "front_facing_plain_url": fwd_url,
                             "driver_facing_plain_url": inward_url,
                         },
                         "downloadable_images": {},
-                    } if (fwd_url or inward_url) else None,
+                    }
+                elif has_image:
+                    camera_media = {
+                        "available": True,
+                        "downloadable_videos": {},
+                        "downloadable_images": {
+                            "front_facing_jpg_url": fwd_img,
+                            "driver_facing_jpg_url": inward_img,
+                        },
+                    }
+                else:
+                    camera_media = None
+                event = {
+                    **event,
+                    "type": resolved_type,
+                    "location": loc.get("address") or "",
+                    "camera_media": camera_media,
                 }
                 logger.info(
                     f"[samsara] enriched: harshType='{harsh_type}' → '{resolved_type}' "
@@ -319,7 +349,7 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
         except Exception:
             occurred_at = datetime.now()
 
-        vehicle_number = _get_vehicle(event)
+        vehicle_number = _get_vehicle(event)[:50]
         meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
         severity = meta_sev or (event.get("severity") or "").strip().lower() or None
         await save_violation(
@@ -531,6 +561,7 @@ async def samsara_webhook(request: web.Request) -> web.Response:
                 return web.Response(text="Forbidden", status=403)
 
         body = json.loads(body_bytes)
+        logger.info(f"[samsara] webhook body:\n{json.dumps(body, indent=2)}")
         event_id = body.get("eventId") or ""
         if _is_duplicate(event_id):
             logger.info(f"[samsara] Duplicate eventId={event_id} — skipping")
