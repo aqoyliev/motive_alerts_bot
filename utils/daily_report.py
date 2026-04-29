@@ -5,26 +5,11 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 
-from utils.db_api.companies import get_all_companies
+from utils.db_api.companies import get_all_companies, get_company_groups
 from utils.db_api.violations import get_top_violators
-from utils.db_api.db import fetch
-from utils.webhook_handler import EVENT_TYPE_MAP
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
-
-
-async def _get_company_groups(company_slug: str) -> list[int]:
-    rows = await fetch(
-        """
-        SELECT cg.telegram_group_id
-        FROM company_groups cg
-        JOIN companies c ON c.id = cg.company_id
-        WHERE c.slug = $1
-        """,
-        company_slug,
-    )
-    return [r["telegram_group_id"] for r in rows]
 
 
 def _format_daily_report(company_name: str, rows: list[dict], date_str: str) -> str:
@@ -47,7 +32,7 @@ async def send_daily_reports(bot: Bot):
         try:
             rows = await get_top_violators(company["slug"], since=today_start, limit=10)
             text = _format_daily_report(company["name"], rows, date_str)
-            group_ids = await _get_company_groups(company["slug"])
+            group_ids = await get_company_groups(company["slug"])
             for chat_id in group_ids:
                 await bot.send_message(chat_id, text, parse_mode="HTML")
         except Exception as e:

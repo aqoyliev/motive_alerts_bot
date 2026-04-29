@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -19,15 +21,33 @@ from utils.db_api.admins import get_subscribed_admins
 logger = logging.getLogger(__name__)
 
 _download_timeout = aiohttp.ClientTimeout(total=300)
+_http_session: aiohttp.ClientSession | None = None
+
+# In-memory deduplication: eventId -> processed timestamp
+import time as _time
+_seen_event_ids: dict[str, float] = {}
+_DEDUP_TTL = 300  # seconds
+
+def _is_duplicate(event_id: str) -> bool:
+    """Return True if this eventId was already processed within the last 5 minutes."""
+    if not event_id:
+        return False
+    now = _time.monotonic()
+    for k in list(_seen_event_ids):
+        if now - _seen_event_ids[k] > _DEDUP_TTL:
+            del _seen_event_ids[k]
+    if event_id in _seen_event_ids:
+        return True
+    _seen_event_ids[event_id] = now
+    return False
 
 
 async def _download(url: str) -> bytes | None:
     try:
-        async with aiohttp.ClientSession(timeout=_download_timeout) as s:
-            async with s.get(url) as r:
-                if r.status == 200:
-                    return await r.read()
-                logger.error(f"Download failed HTTP {r.status}: {url}")
+        async with _http_session.get(url) as r:
+            if r.status == 200:
+                return await r.read()
+            logger.error(f"Download failed HTTP {r.status}: {url}")
     except Exception as e:
         logger.error(f"Download error: {e}")
     return None
@@ -53,56 +73,75 @@ EVENT_TYPE_MAP = {
     "speeding":                     ("🚨", "SPEEDING OVER POSTED"),
     "harsh_event":                  ("⚠️", "HARSH EVENT"),
     "inattentive_driving":          ("😵", "INATTENTIVE DRIVING"),
-    "drowsy_driving":               ("😴", "DROWSY DRIVING"),
+    "drowsy_driving":               ("😴", "POSSIBLE DROWSINESS"),
     "harsh_acceleration":           ("🚀", "HARSH ACCELERATION"),
-    "no_seat_belt":                 ("🪑", "NO SEAT BELT"),
+    "no_seat_belt":                 ("🚫", "NO SEAT BELT"),
     "obstructed_camera":            ("📷", "OBSTRUCTED CAMERA"),
 }
 
 # Only process these event types — everything else is ignored
 ALLOWED_TYPES = set(EVENT_TYPE_MAP.keys())
 
-# Samsara Safety API behavior label → internal event type
-_SAMSARA_LABEL_MAP: dict[str, str] = {
-    "harshBraking":       "hard_brake",
-    "harshAcceleration":  "harsh_acceleration",
-    "crash":              "crash",
-    "mobileUsage":        "cell_phone",
-    "inattentiveDriving": "inattentive_driving",
-    "drowsyDriving":      "drowsy_driving",
-    "obstructedCamera":    "obstructed_camera",
-    "noSeatbelt":          "no_seat_belt",
-    "genericDistraction":  "inattentive_driving",
-}
-
 # Motive speeding webhook uses "action" field with these values
-SPEEDING_ACTIONS = {"speeding_event_created", "speeding_event_updated"}
+SPEEDING_ACTIONS = {"speeding_event_created"}
+
+# Samsara legacy harsh event API harshEventType string → internal event type
+_SAMSARA_HARSH_TYPE_MAP: dict[str, str] = {
+    "Harsh Braking":       "hard_brake",
+    "Harsh Brake":         "hard_brake",
+    "Harsh Acceleration":  "harsh_acceleration",
+    "Crash":               "crash",
+    "Mobile Usage":        "cell_phone",
+    "Inattentive Driving": "inattentive_driving",
+    "Inattentive":         "inattentive_driving",
+    "Drowsy Driving":      "drowsy_driving",
+    "Drowsy":              "drowsy_driving",
+    "Obstructed Camera":   "obstructed_camera",
+    "No Seat Belt":        "no_seat_belt",
+    "Generic Distraction": "inattentive_driving",
+    "Tailgating":          "tailgating",
+}
 
 
 def _kph_to_mph(kph: float) -> float:
     return kph * 0.621371
 
 
-async def _fetch_samsara_safety_event(vehicle_id: str, event_time: str) -> dict | None:
-    """Fetch full safety event details from Samsara API using vehicle ID and timestamp."""
-    from datetime import timedelta
-    try:
-        dt = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
-        start = (dt - timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        end = (dt + timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        headers = {"Authorization": f"Bearer {config.SAMSARA_API_KEY}"}
-        params = {"vehicleIds": vehicle_id, "startTime": start, "endTime": end}
-        async with aiohttp.ClientSession() as s:
-            async with s.get("https://api.samsara.com/fleet/safety-events",
-                             headers=headers, params=params) as r:
+def _verify_hmac(secret: str, body: bytes, provided: str) -> bool:
+    """Constant-time HMAC-SHA256 verification. Accepts hex or base64 encoding."""
+    import base64
+    mac = hmac.new(secret.encode(), body, hashlib.sha256)
+    return (
+        hmac.compare_digest(mac.hexdigest(), provided)
+        or hmac.compare_digest(base64.b64encode(mac.digest()).decode(), provided)
+    )
+
+
+async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict | None:
+    """Poll harsh event API every 10s (up to 6 attempts) until both video URLs are present."""
+    url = f"https://api.samsara.com/v1/fleet/vehicles/{vehicle_id}/safety/harsh_event"
+    headers = {"Authorization": f"Bearer {config.SAMSARA_API_KEY}"}
+    last_data = None
+    for attempt in range(1, 13):
+        await asyncio.sleep(10)
+        try:
+            async with _http_session.get(url, headers=headers, params={"timestamp": timestamp_ms}) as r:
                 if r.status == 200:
                     data = await r.json()
-                    events = data.get("data") or []
-                    return events[0] if events else None
-                logger.error(f"Samsara Safety API error HTTP {r.status}")
-    except Exception as e:
-        logger.error(f"Samsara Safety API fetch error: {e}")
-    return None
+                    last_data = data
+                    fwd = data.get("downloadForwardVideoUrl") or ""
+                    inward = data.get("downloadInwardVideoUrl") or ""
+                    if fwd and inward:
+                        logger.info(f"[samsara] Both video URLs ready on attempt {attempt}")
+                        return data
+                    logger.info(f"[samsara] Attempt {attempt}/12: fwd={bool(fwd)} inward={bool(inward)} — retrying in 10s")
+                else:
+                    body_text = await r.text()
+                    logger.error(f"[samsara] harsh_event API HTTP {r.status} attempt {attempt}: {body_text[:300]}")
+        except Exception as e:
+            logger.error(f"[samsara] harsh_event API error attempt {attempt}: {e}")
+    logger.warning("[samsara] Gave up after 12 attempts — sending with available URLs")
+    return last_data
 
 
 def _to_et(utc_iso: str) -> str:
@@ -165,7 +204,18 @@ def _format_event(event: dict, company_name: str = "") -> str:
     lines = [f"{emoji} <b>{title}</b>\n"]
     if company_name and event_type == "crash":
         lines.append(company_name)
-    lines.append(vehicle)
+    v = vehicle.strip()
+    if v.lower().startswith("unit "):
+        v = v[5:].strip()
+    if " " in v:
+        num, rest = v.split(" ", 1)
+        vehicle_fmt = f"<code>{num}</code> <code>{rest}</code>"
+    else:
+        vehicle_fmt = f"<code>{v}</code>" if v else "—"
+    if event.get("_source") == "samsara":
+        lines.append(vehicle_fmt)
+    else:
+        lines.append(f"🚛 <b>Vehicle:</b> {vehicle_fmt}")
     if driver and driver != "Unidentified":
         lines.append(f"👤 <b>Driver:</b> {driver}")
     if sev_display and event_type not in {"driver_facing_cam_obstruction", "road_facing_cam_obstruction"}:
@@ -196,6 +246,8 @@ def _format_event(event: dict, company_name: str = "") -> str:
         if duration:
             lines.append(f"⏱ <b>Duration:</b> {duration}s")
 
+    source = "Samsara" if event.get("_source") == "samsara" else "Motive"
+    lines.append(f"\n<i>via {source}</i>")
     return "\n".join(lines)
 
 
@@ -211,8 +263,9 @@ def _get_camera_media_info(event: dict) -> tuple[list[str], list[str]]:
     return video_urls, image_urls
 
 
-async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
-    """Filter → format → send to Telegram (URLs sent directly, no download)."""
+async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
+    """Filter → format → send to Telegram."""
+    company_slug = company_slug or config.COMPANY_SLUG
     try:
         event_type = _get_event_type(event)
         event_id = event.get("id", "?")
@@ -261,62 +314,65 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
         if not video_urls and not image_urls and event.get("camera_media") is None and event_type != "speeding":
             text += "\n\n📷 <i>No camera media available</i>"
 
+        is_video = bool(video_urls)
+        media_urls = video_urls or image_urls or []
+
+        # Send URLs directly — Telegram fetches from CDN
+        media: list = media_urls
+
+        # Uncomment if Motive URLs ever need to be downloaded first:
+        # media = []
+        # for i, url in enumerate(media_urls):
+        #     data = await _download(url)
+        #     if data:
+        #         logger.info(f"Downloaded {len(data)} bytes for media_{i+1}")
+        #         media.append(data)
+        #     else:
+        #         logger.error(f"Download failed for {url}")
+
         for chat_id in group_ids:
-            await _send_with_retry(bot, chat_id, text, video_urls, image_urls)
+            await _send_with_retry(bot, chat_id, text, is_video, media)
 
         dm_ids = await get_subscribed_admins(event_type, company_slug)
         for telegram_id in dm_ids:
-            await _send_with_retry(bot, telegram_id, text, video_urls, image_urls)
+            await _send_with_retry(bot, telegram_id, text, is_video, media)
 
     except Exception as e:
         logger.error(f"Event handling error: {e}", exc_info=True)
 
 
-async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[str] = None,
-                           image_urls: list[str] = None, retries: int = 3, delay: float = 5.0):
-    """Send alert to a single chat. Tries videos/images by URL; falls back to text+links on failure."""
-    media_urls = video_urls or image_urls or []
-    is_video = bool(video_urls)
+async def _send_with_retry(bot: Bot, chat_id: int, text: str, is_video: bool = False,
+                           media: list = None, retries: int = 3, delay: float = 5.0):
+    """Send alert to a single chat. media is a list of URL strings or bytes objects."""
+    media = media or []
 
-    # Try sending media as a group by URL first
-    if media_urls:
+    if media:
         ext = "mp4" if is_video else "jpg"
         MediaType = InputMediaVideo if is_video else InputMediaPhoto
 
-        async def _try_send_group(sources):
-            """sources: list of str (URL) or bytes (downloaded)."""
-            if len(sources) == 1:
-                src = sources[0]
-                media = InputFile(io.BytesIO(src), filename=f"media_1.{ext}") if isinstance(src, bytes) else src
+        def _to_file(i: int, src):
+            return InputFile(io.BytesIO(src), filename=f"media_{i+1}.{ext}") if isinstance(src, bytes) else src
+
+        async def _try_send_group():
+            if len(media) == 1:
                 send_fn = bot.send_video if is_video else bot.send_photo
-                await send_fn(chat_id, media, caption=text, parse_mode="HTML")
+                await send_fn(chat_id, _to_file(0, media[0]), caption=text, parse_mode="HTML")
             else:
-                def _make(i, src):
-                    m = InputFile(io.BytesIO(src), filename=f"media_{i+1}.{ext}") if isinstance(src, bytes) else src
-                    return MediaType(m, caption=text if i == 0 else None, parse_mode="HTML" if i == 0 else None)
-                await bot.send_media_group(chat_id, [_make(i, s) for i, s in enumerate(sources)])
+                items = [MediaType(_to_file(i, s), caption=text if i == 0 else None,
+                                   parse_mode="HTML" if i == 0 else None)
+                         for i, s in enumerate(media)]
+                await bot.send_media_group(chat_id, items)
 
-        # Download all files, then send as a group
-        downloaded = []
-        for i, url in enumerate(media_urls):
-            data = await _download(url)
-            if data:
-                logger.info(f"Downloaded {len(data)} bytes for media_{i+1}")
-                downloaded.append(data)
-            else:
-                logger.error(f"Download failed for {url}")
-
-        if downloaded:
-            for attempt in range(3):
-                try:
-                    await _try_send_group(downloaded)
-                    return
-                except RetryAfter as e:
-                    logger.warning(f"Flood control (media) for {chat_id}, waiting {e.timeout}s")
-                    await asyncio.sleep(e.timeout + 1)
-                except (TimeoutError, NetworkError, TelegramAPIError) as e:
-                    logger.warning(f"Media send failed for {chat_id} (attempt {attempt+1}/3): {e} — retrying")
-                    await asyncio.sleep(5)
+        for attempt in range(3):
+            try:
+                await _try_send_group()
+                return
+            except RetryAfter as e:
+                logger.warning(f"Flood control (media) for {chat_id}, waiting {e.timeout}s")
+                await asyncio.sleep(e.timeout + 1)
+            except (TimeoutError, NetworkError, TelegramAPIError) as e:
+                logger.warning(f"Media send failed for {chat_id} (attempt {attempt+1}/3): {e} — retrying")
+                await asyncio.sleep(5)
 
         # Last resort: text only so the alert is never lost
         logger.error(f"All media failed for {chat_id}, sending text only")
@@ -373,6 +429,7 @@ async def _parse_samsara(body: dict) -> tuple[str, dict]:
             "location":           "",
             "nominatim_location": "",
             "severity":           severity,
+            "_source":            "samsara",
         }
         return "speeding", normalized
 
@@ -389,9 +446,9 @@ async def _parse_samsara(body: dict) -> tuple[str, dict]:
             "location":           "",
             "nominatim_location": "",
             "severity":           "critical",
+            "_source":            "samsara",
         }
         return "speeding", normalized
-
 
     if event_type_raw == "AlertIncident":
         data = body.get("data") or {}
@@ -401,22 +458,36 @@ async def _parse_samsara(body: dict) -> tuple[str, dict]:
         details = (conditions[0].get("details") or {})
 
         if "harshEvent" in details:
-            vehicle_obj = details["harshEvent"].get("vehicle") or {}
+            harsh = details["harshEvent"]
+            vehicle_obj = harsh.get("vehicle") or {}
             vehicle_id = vehicle_obj.get("id") or ""
             event_time = data.get("happenedAtTime") or body.get("eventTime") or ""
 
-            safety = await _fetch_samsara_safety_event(vehicle_id, event_time)
-            if safety:
-                labels = safety.get("behaviorLabels") or []
-                label = labels[0].get("label") if labels else ""
-                event_type = _SAMSARA_LABEL_MAP.get(label, "harsh_event")
-                loc = safety.get("location") or {}
-                lat, lng = loc.get("latitude"), loc.get("longitude")
-                location_str = f"{lat}, {lng}" if lat and lng else ""
-                g_force = safety.get("maxAccelerationGForce") or 0
-                logger.info(f"[samsara] Safety API: label={label} event_type={event_type} g={g_force}")
+            # Extract timestamp from last segment of incidentUrl
+            timestamp_ms = 0
+            parts = (data.get("incidentUrl") or "").rstrip("/").split("/")
+            if parts and parts[-1].isdigit():
+                timestamp_ms = int(parts[-1])
+
+            harsh_data = await _fetch_samsara_harsh_event(vehicle_id, timestamp_ms) if (vehicle_id and timestamp_ms) else None
+            if harsh_data:
+                harsh_type = harsh_data.get("harshEventType") or ""
+                event_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "harsh_event")
+                loc = harsh_data.get("location") or {}
+                location_str = loc.get("address") or ""
+                fwd_url = harsh_data.get("downloadForwardVideoUrl") or ""
+                inward_url = harsh_data.get("downloadInwardVideoUrl") or ""
+                camera_media = {
+                    "available": bool(fwd_url or inward_url),
+                    "downloadable_videos": {
+                        "front_facing_plain_url": fwd_url,
+                        "driver_facing_plain_url": inward_url,
+                    },
+                    "downloadable_images": {},
+                } if (fwd_url or inward_url) else None
+                logger.info(f"[samsara] harsh_event API: '{harsh_type}' → {event_type} loc='{location_str}' video={'yes' if camera_media else 'no'}")
             else:
-                event_type, location_str, g_force = "harsh_event", "", 0
+                event_type, location_str, camera_media = "harsh_event", "", None
 
             normalized = {
                 "id":                 body.get("eventId"),
@@ -427,23 +498,36 @@ async def _parse_samsara(body: dict) -> tuple[str, dict]:
                 "location":           location_str,
                 "nominatim_location": "",
                 "severity":           "",
-                "g_force":            g_force,
+                "camera_media":       camera_media,
+                "_source":            "samsara",
             }
             return event_type, normalized
 
         return "", {}
 
+    logger.info(f"[samsara] Unhandled eventType='{event_type_raw}' — ignoring")
     return "", {}
 
 
 async def samsara_webhook(request: web.Request) -> web.Response:
     """Receive Samsara webhook POST, respond 200 immediately, process async."""
     try:
-        company_slug = request.match_info.get("company") or "samsara"
-        body = await request.json()
-        bot: Bot = request.app["bot"]
+        company_slug = request.match_info.get("company") or config.COMPANY_SLUG
+        body_bytes = await request.read()
 
-        logger.info(f"[samsara] RAW {company_slug}: {json.dumps(body, indent=2, default=str)}")
+        if config.SAMSARA_WEBHOOK_SECRET:
+            sig = request.headers.get("X-Samsara-Hmac-Sha256", "")
+            if not _verify_hmac(config.SAMSARA_WEBHOOK_SECRET, body_bytes, sig):
+                logger.warning(f"[samsara] Invalid HMAC signature from {request.remote}")
+                return web.Response(text="Forbidden", status=403)
+
+        body = json.loads(body_bytes)
+        event_id = body.get("eventId") or ""
+        if _is_duplicate(event_id):
+            logger.info(f"[samsara] Duplicate eventId={event_id} — skipping")
+            return web.Response(text="OK", status=200)
+
+        bot: Bot = request.app["bot"]
 
         event_type, normalized = await _parse_samsara(body)
         if not event_type or event_type not in ALLOWED_TYPES:
@@ -461,13 +545,25 @@ async def motive_webhook(request: web.Request) -> web.Response:
     """Receive Motive webhook POST, respond 200 immediately, process async."""
     try:
         company_slug = request.match_info.get("company") or config.COMPANY_SLUG
-        body = await request.json()
+        body_bytes = await request.read()
 
+        if config.MOTIVE_WEBHOOK_SECRET:
+            sig = request.headers.get("X-Motive-Hmac-Sha256", "")
+            if not _verify_hmac(config.MOTIVE_WEBHOOK_SECRET, body_bytes, sig):
+                logger.warning(f"[motive] Invalid HMAC signature from {request.remote}")
+                return web.Response(text="Forbidden", status=403)
+
+        body = json.loads(body_bytes)
         bot: Bot = request.app["bot"]
 
         # Verification ping — list of event type strings
         if isinstance(body, list) and all(isinstance(i, str) for i in body):
             logger.info(f"Webhook verification ping: {body}")
+            return web.Response(text="OK", status=200)
+
+        event_id = (body if isinstance(body, dict) else {}).get("id") or ""
+        if _is_duplicate(event_id):
+            logger.info(f"[motive] Duplicate event id={event_id} — skipping")
             return web.Response(text="OK", status=200)
 
         items = body if isinstance(body, list) else [body]
@@ -494,16 +590,31 @@ async def motive_webhook(request: web.Request) -> web.Response:
 
 
 async def start_webhook_server(bot: Bot, port: int = 8080):
+    global _http_session
+    _http_session = aiohttp.ClientSession(timeout=_download_timeout)
+
+    if not config.MOTIVE_WEBHOOK_SECRET:
+        logger.warning("MOTIVE_WEBHOOK_SECRET not set — Motive webhook auth disabled")
+    if not config.SAMSARA_WEBHOOK_SECRET:
+        logger.warning("SAMSARA_WEBHOOK_SECRET not set — Samsara webhook auth disabled")
+
     app = web.Application()
     app["bot"] = bot
     app.router.add_post("/webhook/samsara/{company}", samsara_webhook)
     app.router.add_post("/webhook/samsara", samsara_webhook)
+    app.router.add_post("/webhook/motive/{company}", motive_webhook)
+    app.router.add_post("/webhook/motive", motive_webhook)
     app.router.add_post("/webhook/{company}", motive_webhook)
     app.router.add_post("/webhook", motive_webhook)
     app.router.add_get("/health", lambda r: web.Response(text="OK"))
+
+    async def _on_cleanup(_app):
+        await _http_session.close()
+
+    app.on_cleanup.append(_on_cleanup)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"Motive webhook server listening on port {port}")
+    logger.info(f"Webhook server listening on port {port}")

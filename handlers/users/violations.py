@@ -3,13 +3,13 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import types
-from aiogram.utils.exceptions import MessageCantBeEdited, MessageNotModified
 
 from loader import dp
 from utils.db_api.admins import is_admin, is_super_admin
 from utils.db_api.violations import get_top_violators, get_vehicle_events
 from utils.db_api.companies import get_company_name as _get_company_name
 from utils.webhook_handler import EVENT_TYPE_MAP
+from utils.misc.telegram import edit_or_send
 from keyboards.inline.violations import (
     event_type_keyboard,
     top10_keyboard,
@@ -56,23 +56,13 @@ def _format_top10_text(rows: list[dict], period_label: str, company_name: str, e
     return "\n".join(lines)
 
 
-async def _edit_or_send(call: types.CallbackQuery, text: str, reply_markup, parse_mode="HTML"):
-    """Try to edit the existing message; if too old, send a new one; if unchanged, do nothing."""
-    try:
-        await call.message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
-    except MessageNotModified:
-        pass
-    except MessageCantBeEdited:
-        await call.message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
-
-
 async def _show_top10(call: types.CallbackQuery, company_slug: str, period: str, event_type: str):
     company_name = await _get_company_name(company_slug) or company_slug
     since, until = _period_range(period)
     rows = await get_top_violators(company_slug, since, until=until, event_type=event_type, limit=10)
     text = _format_top10_text(rows, PERIOD_LABELS[period], company_name, event_type)
     kb = top10_keyboard(rows, company_slug, period, event_type)
-    await _edit_or_send(call, text, kb)
+    await edit_or_send(call, text, kb)
     await call.answer()
 
 
@@ -91,7 +81,7 @@ async def cb_back_event_type(call: types.CallbackQuery):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
     company_slug = call.data.split(":")[1]
-    await _edit_or_send(call, "Select event type:", event_type_keyboard(company_slug), parse_mode=None)
+    await edit_or_send(call, "Select event type:", event_type_keyboard(company_slug), parse_mode=None)
     await call.answer()
 
 

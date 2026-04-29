@@ -36,6 +36,20 @@ async def get_accessible_companies(telegram_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_company_groups(company_slug: str) -> list[int]:
+    """Returns all telegram_group_ids configured for a company (ignores event type filter)."""
+    rows = await db.fetch(
+        """
+        SELECT cg.telegram_group_id
+        FROM company_groups cg
+        JOIN companies c ON c.id = cg.company_id
+        WHERE c.slug = $1
+        """,
+        company_slug,
+    )
+    return [r["telegram_group_id"] for r in rows]
+
+
 async def get_groups_for_event(company_slug: str, event_type: str) -> list[int]:
     """
     Returns telegram_group_ids that should receive this event type for the given company.

@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS admin_subscriptions (
 CREATE TABLE IF NOT EXISTS violations (
     id           BIGSERIAL    PRIMARY KEY,
     company_slug VARCHAR(50)  NOT NULL,
-    vehicle_number VARCHAR(50) NOT NULL,
+    vehicle_number VARCHAR(100) NOT NULL,
     event_type   VARCHAR(50)  NOT NULL,
     event_id     BIGINT       UNIQUE,
     severity     VARCHAR(20),

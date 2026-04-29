@@ -1,8 +1,8 @@
 from aiogram import types
 from aiogram.dispatcher import FSMContext
-from aiogram.utils.exceptions import MessageCantBeEdited, MessageNotModified
 
 from loader import dp
+from utils.misc.telegram import edit_or_send
 from states.admin_mgmt import AdminAdd
 from utils.db_api.admins import (
     is_super_admin,
@@ -25,15 +25,6 @@ from keyboards.inline.admin_mgmt import (
 )
 
 
-async def _edit_or_send(call: types.CallbackQuery, text: str, reply_markup, parse_mode="HTML"):
-    try:
-        await call.message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
-    except MessageNotModified:
-        pass
-    except MessageCantBeEdited:
-        await call.message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
-
-
 def _format_admin_detail(admin: dict, company_names: list[str]) -> str:
     uname = f" (@{admin['username']})" if admin["username"] else ""
     status = "✅ Active" if admin["is_active"] else "⛔ Inactive"
@@ -53,10 +44,10 @@ def _format_admin_detail(admin: dict, company_names: list[str]) -> str:
 async def _show_admin_list(call: types.CallbackQuery):
     admins = await get_all_admins()
     if not admins:
-        await _edit_or_send(call, "No admins found.", None)
+        await edit_or_send(call, "No admins found.", None)
         return
     text = "👥 <b>Admin Management</b>\n\nSelect an admin to manage:"
-    await _edit_or_send(call, text, admin_list_keyboard(admins))
+    await edit_or_send(call, text, admin_list_keyboard(admins))
 
 
 async def _show_admin_detail(call: types.CallbackQuery, admin_id: int):
@@ -70,7 +61,7 @@ async def _show_admin_detail(call: types.CallbackQuery, admin_id: int):
     company_map = {c["id"]: c["name"] for c in companies}
     company_names = [company_map[cid] for cid in assigned_ids if cid in company_map]
     text = _format_admin_detail(admin, company_names)
-    await _edit_or_send(call, text, admin_detail_keyboard(admin))
+    await edit_or_send(call, text, admin_detail_keyboard(admin))
 
 
 # Entry point from main menu button
@@ -136,7 +127,7 @@ async def cb_adm_remove(call: types.CallbackQuery):
         f"⚠️ Remove <b>{admin['full_name']}</b>{uname} as admin?\n"
         "This cannot be undone."
     )
-    await _edit_or_send(call, text, admin_remove_confirm_keyboard(admin_id))
+    await edit_or_send(call, text, admin_remove_confirm_keyboard(admin_id))
     await call.answer()
 
 
@@ -176,7 +167,7 @@ async def cb_adm_companies(call: types.CallbackQuery):
     all_companies = await get_all_companies()
     uname = f" (@{admin['username']})" if admin["username"] else ""
     text = f"🏢 <b>Company access for {admin['full_name']}</b>{uname}\n\nTap a company to toggle access:"
-    await _edit_or_send(call, text, admin_companies_keyboard(admin_id, all_companies, assigned_ids))
+    await edit_or_send(call, text, admin_companies_keyboard(admin_id, all_companies, assigned_ids))
     await call.answer()
 
 
@@ -202,7 +193,7 @@ async def cb_adm_co_toggle(call: types.CallbackQuery):
     all_companies = await get_all_companies()
     uname = f" (@{admin['username']})" if admin["username"] else ""
     text = f"🏢 <b>Company access for {admin['full_name']}</b>{uname}\n\nTap a company to toggle access:"
-    await _edit_or_send(call, text, admin_companies_keyboard(admin_id, all_companies, new_assigned))
+    await edit_or_send(call, text, admin_companies_keyboard(admin_id, all_companies, new_assigned))
     await call.answer()
 
 

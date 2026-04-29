@@ -12,6 +12,7 @@ tzdata = "*"
 aiohttp = "*"
 beautifulsoup4 = "*"
 asyncpg = "*"
+aioredis = "*"
 
 [dev-packages]
 
