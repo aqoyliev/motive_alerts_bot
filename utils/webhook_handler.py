@@ -101,6 +101,9 @@ _SAMSARA_HARSH_TYPE_MAP: dict[str, str] = {
     "Tailgating":          "tailgating",
 }
 
+# Harsh event types that never produce a video clip — stop retrying on first 200
+_IMAGE_ONLY_HARSH_TYPES = {"Obstructed Camera", "No Seat Belt"}
+
 
 def _kph_to_mph(kph: float) -> float:
     return kph * 0.621371
@@ -116,23 +119,22 @@ def _verify_hmac(secret: str, body: bytes, provided: str) -> bool:
     )
 
 
-# Harsh event types that never produce a video clip — stop retrying on first 200
-_IMAGE_ONLY_HARSH_TYPES = {"Obstructed Camera", "No Seat Belt"}
-
-
 async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict | None:
-    """Poll harsh event API every 10s. Gives up after 2 consecutive empty responses."""
+    """Poll harsh event API every 10s. Gives up after 2 consecutive empty/error responses."""
     url = f"https://api.samsara.com/v1/fleet/vehicles/{vehicle_id}/safety/harsh_event"
     headers = {"Authorization": f"Bearer {config.SAMSARA_API_KEY}"}
     last_data = None
     empty_attempts = 0
+    error_attempts = 0
     for attempt in range(1, 13):
         await asyncio.sleep(10)
         try:
             async with _http_session.get(url, headers=headers, params={"timestamp": timestamp_ms}) as r:
                 if r.status == 200:
+                    error_attempts = 0
                     data = await r.json()
                     last_data = data
+                    # logger.info(f"[samsara] harsh_event API response (attempt {attempt}):\n{json.dumps(data, indent=2)}")
                     harsh_type = data.get("harshEventType") or ""
                     if harsh_type in _IMAGE_ONLY_HARSH_TYPES:
                         logger.info(f"[samsara] '{harsh_type}' is image-only — returning on first response")
@@ -142,14 +144,19 @@ async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict
                     if fwd and inward:
                         logger.info(f"[samsara] Both video URLs ready on attempt {attempt}")
                         return data
-                    empty_attempts += 1
-                    if empty_attempts >= 2:
-                        logger.warning(f"[samsara] No video URLs after {attempt} attempts — giving up")
-                        return last_data
+                    if not fwd and not inward:
+                        empty_attempts += 1
+                        if empty_attempts >= 2:
+                            logger.warning(f"[samsara] No video URLs after {attempt} attempts — giving up")
+                            return last_data
                     logger.info(f"[samsara] Attempt {attempt}/12: fwd={bool(fwd)} inward={bool(inward)} — retrying in 10s")
                 else:
                     body_text = await r.text()
                     logger.error(f"[samsara] harsh_event API HTTP {r.status} attempt {attempt}: {body_text[:300]}")
+                    error_attempts += 1
+                    if error_attempts >= 2:
+                        logger.warning(f"[samsara] Giving up after {error_attempts} HTTP errors — event will not be sent")
+                        return None
         except Exception as e:
             logger.error(f"[samsara] harsh_event API error attempt {attempt}: {e}")
     logger.warning("[samsara] Gave up after 12 attempts — sending with available URLs")
@@ -217,8 +224,11 @@ def _format_event(event: dict, company_name: str = "") -> str:
     if company_name and event_type == "crash":
         lines.append(company_name)
     v = vehicle.strip()
-    if v.lower().startswith("unit "):
-        v = v[5:].strip()
+    low = v.lower()
+    for _pfx in ("unit ", "unit:", "unit#"):
+        if low.startswith(_pfx):
+            v = v[len(_pfx):].strip()
+            break
     if " " in v:
         num, rest = v.split(" ", 1)
         vehicle_fmt = f"<code>{num}</code> <code>{rest}</code>"
@@ -284,6 +294,9 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
             harsh_data = await _fetch_samsara_harsh_event(
                 event["_samsara_vehicle_id"], event["_samsara_timestamp_ms"]
             )
+            if harsh_data is None:
+                logger.info(f"[samsara] API returned no data — skipping event id={event.get('id')}")
+                return
             if harsh_data:
                 harsh_type = harsh_data.get("harshEventType") or ""
                 resolved_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "harsh_event")
@@ -322,7 +335,7 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
                 }
                 logger.info(
                     f"[samsara] enriched: harshType='{harsh_type}' → '{resolved_type}' "
-                    f"loc='{event['location']}' video={'yes' if event['camera_media'] else 'no'}"
+                    f"loc='{event['location']}' video={'yes' if camera_media else 'no'}"
                 )
 
         event_type = _get_event_type(event)
@@ -560,6 +573,7 @@ async def samsara_webhook(request: web.Request) -> web.Response:
                 return web.Response(text="Forbidden", status=403)
 
         body = json.loads(body_bytes)
+        # logger.info(f"[samsara] webhook body:\n{json.dumps(body, indent=2)}")
         event_id = body.get("eventId") or ""
         if _is_duplicate(event_id):
             logger.info(f"[samsara] Duplicate eventId={event_id} — skipping")
