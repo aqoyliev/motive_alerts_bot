@@ -346,18 +346,14 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
         is_video = bool(video_urls)
         media_urls = video_urls or image_urls or []
 
-        # Send URLs directly — Telegram fetches from CDN
-        media: list = media_urls
-
-        # Uncomment if Motive URLs ever need to be downloaded first:
-        # media = []
-        # for i, url in enumerate(media_urls):
-        #     data = await _download(url)
-        #     if data:
-        #         logger.info(f"Downloaded {len(data)} bytes for media_{i+1}")
-        #         media.append(data)
-        #     else:
-        #         logger.error(f"Download failed for {url}")
+        media = []
+        for i, url in enumerate(media_urls):
+            data = await _download(url)
+            if data:
+                logger.info(f"Downloaded {len(data)} bytes for media_{i+1}")
+                media.append(data)
+            else:
+                logger.error(f"Download failed for media_{i+1}: {url}")
 
         for chat_id in group_ids:
             await _send_with_retry(bot, chat_id, text, is_video, media)
