@@ -120,18 +120,9 @@ def _verify_hmac(secret: str, body: bytes, provided: str) -> bool:
     if _check(secret.encode()):
         return True
     try:
-        if _check(base64.b64decode(secret)):
-            return True
+        return _check(base64.b64decode(secret))
     except Exception:
-        pass
-    # Debug: log what we computed vs what was provided
-    mac_raw = hmac.new(secret.encode(), body, hashlib.sha256)
-    logger.warning(
-        f"[hmac_debug] provided={provided!r} "
-        f"computed_hex={mac_raw.hexdigest()!r} "
-        f"computed_b64={base64.b64encode(mac_raw.digest()).decode()!r}"
-    )
-    return False
+        return False
 
 
 async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict | None:
