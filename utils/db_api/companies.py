@@ -50,6 +50,13 @@ async def get_company_groups(company_slug: str) -> list[int]:
     return [r["telegram_group_id"] for r in rows]
 
 
+async def update_group_chat_id(old_id: int, new_id: int) -> None:
+    await db.execute(
+        "UPDATE company_groups SET telegram_group_id = $1 WHERE telegram_group_id = $2",
+        new_id, old_id,
+    )
+
+
 async def get_groups_for_event(company_slug: str, event_type: str) -> list[int]:
     """
     Returns telegram_group_ids that should receive this event type for the given company.

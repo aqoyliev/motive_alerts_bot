@@ -11,10 +11,10 @@ import aiohttp
 from aiohttp import web
 from aiogram import Bot
 from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
-from aiogram.utils.exceptions import NetworkError, TelegramAPIError, RetryAfter
+from aiogram.utils.exceptions import NetworkError, TelegramAPIError, RetryAfter, MigrateToChat
 
 from data import config
-from utils.db_api.companies import get_groups_for_event, get_company_name
+from utils.db_api.companies import get_groups_for_event, get_company_name, update_group_chat_id
 from utils.db_api.violations import save_violation
 from utils.db_api.admins import get_subscribed_admins
 
@@ -101,9 +101,6 @@ _SAMSARA_HARSH_TYPE_MAP: dict[str, str] = {
     "Tailgating":          "tailgating",
 }
 
-# Harsh event types that never produce a video clip — stop retrying on first 200
-_IMAGE_ONLY_HARSH_TYPES = {"Obstructed Camera", "No Seat Belt"}
-
 
 def _kph_to_mph(kph: float) -> float:
     return kph * 0.621371
@@ -120,46 +117,41 @@ def _verify_hmac(secret: str, body: bytes, provided: str) -> bool:
 
 
 async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict | None:
-    """Poll harsh event API every 10s. Gives up after 2 consecutive empty/error responses."""
+    """Poll harsh event API every 20s for up to 2 minutes, waiting for both video URLs."""
     url = f"https://api.samsara.com/v1/fleet/vehicles/{vehicle_id}/safety/harsh_event"
     headers = {"Authorization": f"Bearer {config.SAMSARA_API_KEY}"}
     last_data = None
-    empty_attempts = 0
-    error_attempts = 0
-    for attempt in range(1, 13):
-        await asyncio.sleep(10)
+    ever_got_url = False
+    for attempt in range(1, 7):
+        await asyncio.sleep(20)
         try:
             async with _http_session.get(url, headers=headers, params={"timestamp": timestamp_ms}) as r:
                 if r.status == 200:
-                    error_attempts = 0
                     data = await r.json()
                     last_data = data
                     # logger.info(f"[samsara] harsh_event API response (attempt {attempt}):\n{json.dumps(data, indent=2)}")
                     harsh_type = data.get("harshEventType") or ""
-                    if harsh_type in _IMAGE_ONLY_HARSH_TYPES:
-                        logger.info(f"[samsara] '{harsh_type}' is image-only — returning on first response")
-                        return data
+                    if harsh_type == "Obstructed Camera":
+                        logger.info(f"[samsara] Obstructed Camera — skipping event")
+                        return None
                     fwd = data.get("downloadForwardVideoUrl") or ""
                     inward = data.get("downloadInwardVideoUrl") or ""
                     if fwd and inward:
                         logger.info(f"[samsara] Both video URLs ready on attempt {attempt}")
                         return data
-                    if not fwd and not inward:
-                        empty_attempts += 1
-                        if empty_attempts >= 2:
-                            logger.warning(f"[samsara] No video URLs after {attempt} attempts — giving up")
-                            return last_data
-                    logger.info(f"[samsara] Attempt {attempt}/12: fwd={bool(fwd)} inward={bool(inward)} — retrying in 10s")
+                    if fwd or inward:
+                        ever_got_url = True
+                    if attempt >= 3 and not ever_got_url:
+                        logger.warning(f"[samsara] No URLs after {attempt} attempts — sending with no media")
+                        return last_data
+                    logger.info(f"[samsara] Attempt {attempt}/6: fwd={bool(fwd)} inward={bool(inward)} — retrying in 20s")
                 else:
                     body_text = await r.text()
-                    logger.error(f"[samsara] harsh_event API HTTP {r.status} attempt {attempt}: {body_text[:300]}")
-                    error_attempts += 1
-                    if error_attempts >= 2:
-                        logger.warning(f"[samsara] Giving up after {error_attempts} HTTP errors — event will not be sent")
-                        return None
+                    logger.error(f"[samsara] harsh_event API HTTP {r.status} on attempt {attempt} — giving up")
+                    return None
         except Exception as e:
             logger.error(f"[samsara] harsh_event API error attempt {attempt}: {e}")
-    logger.warning("[samsara] Gave up after 12 attempts — sending with available URLs")
+    logger.warning("[samsara] Gave up after 6 attempts — sending with available URLs")
     return last_data
 
 
@@ -195,6 +187,16 @@ def _get_vehicle(event: dict) -> str:
         or str(event.get("vehicle_id") or "")
         or "—"
     )
+
+
+def _get_unit_num(event: dict) -> str:
+    v = _get_vehicle(event).strip()
+    low = v.lower()
+    for pfx in ("unit ", "unit:", "unit#"):
+        if low.startswith(pfx):
+            v = v[len(pfx):].strip()
+            break
+    return v.split()[0] if v else "?"
 
 
 def _format_event(event: dict, company_name: str = "") -> str:
@@ -333,10 +335,6 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
                     "location": loc.get("address") or "",
                     "camera_media": camera_media,
                 }
-                logger.info(
-                    f"[samsara] enriched: harshType='{harsh_type}' → '{resolved_type}' "
-                    f"loc='{event['location']}' video={'yes' if camera_media else 'no'}"
-                )
 
         event_type = _get_event_type(event)
         event_id = event.get("id", "?")
@@ -352,7 +350,7 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
                 logger.info(f"Ignored speeding event {event_id} severity='{sev}' (below threshold)")
                 return
 
-        logger.info(f"Processing event {event_id} type={event_type}")
+        logger.info(f"Processing unit={_get_unit_num(event)} type={event_type} id={event_id} video={'yes' if event.get('camera_media') else 'no'}")
 
         # Parse occurred_at
         occurred_at_str = event.get("start_time") or event.get("created_at") or ""
@@ -437,6 +435,10 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, is_video: bool = F
             except RetryAfter as e:
                 logger.warning(f"Flood control (media) for {chat_id}, waiting {e.timeout}s")
                 await asyncio.sleep(e.timeout + 1)
+            except MigrateToChat as e:
+                logger.warning(f"Group {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB")
+                await update_group_chat_id(chat_id, e.migrate_to_chat_id)
+                chat_id = e.migrate_to_chat_id
             except (TimeoutError, NetworkError, TelegramAPIError) as e:
                 logger.warning(f"Media send failed for {chat_id} (attempt {attempt+1}/3): {e} — retrying")
                 await asyncio.sleep(5)
@@ -450,6 +452,10 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, is_video: bool = F
             except RetryAfter as e:
                 logger.warning(f"Flood control (text) for {chat_id}, waiting {e.timeout}s")
                 await asyncio.sleep(e.timeout + 1)
+            except MigrateToChat as e:
+                logger.warning(f"Group {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB")
+                await update_group_chat_id(chat_id, e.migrate_to_chat_id)
+                chat_id = e.migrate_to_chat_id
         return
 
     # No media — send text only
@@ -460,6 +466,10 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, is_video: bool = F
         except RetryAfter as e:
             logger.warning(f"Flood control (text-only) for {chat_id}, waiting {e.timeout}s")
             await asyncio.sleep(e.timeout + 1)
+        except MigrateToChat as e:
+            logger.warning(f"Group {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB")
+            await update_group_chat_id(chat_id, e.migrate_to_chat_id)
+            chat_id = e.migrate_to_chat_id
         except NetworkError as e:
             if attempt < retries:
                 logger.warning(f"NetworkError sending to {chat_id} (attempt {attempt}/{retries}): {e} — retrying in {delay}s")
