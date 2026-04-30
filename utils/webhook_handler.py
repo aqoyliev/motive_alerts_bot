@@ -107,13 +107,22 @@ def _kph_to_mph(kph: float) -> float:
 
 
 def _verify_hmac(secret: str, body: bytes, provided: str) -> bool:
-    """Constant-time HMAC-SHA256 verification. Accepts hex or base64 encoding."""
+    """Constant-time HMAC-SHA256 verification. Tries raw string key and base64-decoded key, hex and base64 output."""
     import base64
-    mac = hmac.new(secret.encode(), body, hashlib.sha256)
-    return (
-        hmac.compare_digest(mac.hexdigest(), provided)
-        or hmac.compare_digest(base64.b64encode(mac.digest()).decode(), provided)
-    )
+
+    def _check(key: bytes) -> bool:
+        mac = hmac.new(key, body, hashlib.sha256)
+        return (
+            hmac.compare_digest(mac.hexdigest(), provided)
+            or hmac.compare_digest(base64.b64encode(mac.digest()).decode(), provided)
+        )
+
+    if _check(secret.encode()):
+        return True
+    try:
+        return _check(base64.b64decode(secret))
+    except Exception:
+        return False
 
 
 async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict | None:
