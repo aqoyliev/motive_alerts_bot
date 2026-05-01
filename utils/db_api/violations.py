@@ -110,6 +110,24 @@ async def get_vehicle_events(company_slug: str, vehicle_number: str, since, unti
     return [dict(r) for r in rows]
 
 
+async def get_violations_by_type(company_slug: str, since, until=None) -> list[dict]:
+    """Returns violation counts per event_type per vehicle for the given window."""
+    from datetime import datetime, timezone
+    if until is None:
+        until = datetime.now(tz=timezone.utc)
+    rows = await db.fetch(
+        """
+        SELECT event_type, vehicle_number, COUNT(*) AS total
+        FROM violations
+        WHERE company_slug = $1 AND occurred_at >= $2 AND occurred_at < $3
+        GROUP BY event_type, vehicle_number
+        ORDER BY event_type, total DESC
+        """,
+        company_slug, since, until,
+    )
+    return [dict(r) for r in rows]
+
+
 async def get_top_violators_all_companies(since) -> list[dict]:
     """Returns top 5 violators per company for daily auto-report."""
     rows = await db.fetch(
