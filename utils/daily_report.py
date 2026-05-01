@@ -15,7 +15,7 @@ ET = ZoneInfo("America/New_York")
 def _format_daily_report(company_name: str, rows: list[dict], date_str: str) -> str:
     header = f"📊 <b>Daily Violations Report</b>\n<b>{company_name}</b> — {date_str}\n"
     if not rows:
-        return header + "\n✅ No violations today."
+        return header + "\n✅ No violations."
     lines = [header]
     for i, row in enumerate(rows, 1):
         lines.append(f"{i}. 🚛 Unit {row['vehicle_number']} — {row['total']} violation{'s' if row['total'] != 1 else ''}")
@@ -25,12 +25,13 @@ def _format_daily_report(company_name: str, rows: list[dict], date_str: str) -> 
 async def send_daily_reports(bot: Bot):
     now_et = datetime.now(tz=ET)
     today_start = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
-    date_str = today_start.strftime("%b %d, %Y")
+    yesterday_start = today_start - timedelta(days=1)
+    date_str = yesterday_start.strftime("%b %d, %Y")
 
     companies = await get_all_companies()
     for company in companies:
         try:
-            rows = await get_top_violators(company["slug"], since=today_start, limit=10)
+            rows = await get_top_violators(company["slug"], since=yesterday_start, until=today_start, limit=10)
             text = _format_daily_report(company["name"], rows, date_str)
             group_ids = await get_company_groups(company["slug"])
             for chat_id in group_ids:
