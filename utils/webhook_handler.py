@@ -4,6 +4,7 @@ import hmac
 import io
 import json
 import logging
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -206,6 +207,14 @@ def _get_unit_num(event: dict) -> str:
     return v.split()[0] if v else "?"
 
 
+_UNIT_PREFIX_RE = re.compile(r'^unit[\s:#-]+', re.IGNORECASE)
+
+def _clean_vehicle(event: dict) -> str:
+    """Return full vehicle string with leading unit prefix stripped, truncated to 50 chars."""
+    v = _get_vehicle(event).strip()
+    return _UNIT_PREFIX_RE.sub('', v).strip()[:50]
+
+
 def _format_event(event: dict, company_name: str = "") -> str:
     event_type = _get_event_type(event)
     emoji, title = EVENT_TYPE_MAP.get(event_type, ("🚨", event_type.upper().replace("_", " ")))
@@ -366,7 +375,7 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
         except Exception:
             occurred_at = datetime.now()
 
-        vehicle_number = _get_vehicle(event)[:50]
+        vehicle_number = _clean_vehicle(event)
         meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
         severity = meta_sev or (event.get("severity") or "").strip().lower() or None
         await save_violation(
