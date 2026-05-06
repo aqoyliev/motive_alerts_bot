@@ -66,8 +66,6 @@ EVENT_TYPE_MAP = {
     "crash":                        ("💥", "CRASH DETECTED"),
     "cell_phone":                   ("📵", "CELL PHONE USAGE"),
     "stop_sign_violation":          ("🛑", "STOP SIGN VIOLATION"),
-    "road_facing_cam_obstruction":  ("📷", "ROAD CAMERA OBSTRUCTED"),
-    "driver_facing_cam_obstruction":("📷", "DRIVER CAMERA OBSTRUCTED"),
     "forward_collision_warning":    ("⚠️", "FORWARD COLLISION WARNING"),
     "unsafe_parking":               ("🅿️", "UNSAFE PARKING"),
     "speeding":                     ("🚨", "SPEEDING OVER POSTED"),
