@@ -74,6 +74,8 @@ EVENT_TYPE_MAP = {
     "inattentive_driving":          ("😵", "INATTENTIVE DRIVING"),
     "drowsy_driving":               ("😴", "POSSIBLE DROWSINESS"),
     "harsh_acceleration":           ("🚀", "HARSH ACCELERATION"),
+    "harsh_turn":                   ("↩️", "HARSH TURN"),
+    "hard_cornering":               ("↩️", "HARSH TURN"),
     "no_seat_belt":                 ("🚫", "NO SEAT BELT"),
 }
 
@@ -98,6 +100,7 @@ _SAMSARA_HARSH_TYPE_MAP: dict[str, str] = {
     "No Seat Belt":        "no_seat_belt",
     "Generic Distraction": "inattentive_driving",
     "Tailgating":          "tailgating",
+    "Harsh Turn":          "harsh_turn",
 }
 
 
