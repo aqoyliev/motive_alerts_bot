@@ -13,6 +13,21 @@ async def save_violation(company_slug: str, vehicle_number: str, event_type: str
     )
 
 
+async def get_violations_by_type(company_slug: str, since, until) -> list[dict]:
+    """Returns (event_type, vehicle_number, count) for all violations in the window, ordered by type then count desc."""
+    rows = await db.fetch(
+        """
+        SELECT event_type, vehicle_number, COUNT(*) AS total
+        FROM violations
+        WHERE company_slug = $1 AND occurred_at >= $2 AND occurred_at < $3
+        GROUP BY event_type, vehicle_number
+        ORDER BY event_type, total DESC
+        """,
+        company_slug, since, until,
+    )
+    return [dict(r) for r in rows]
+
+
 async def get_top_violators(company_slug: str, since, until=None, event_type: str | None = None,
                              limit: int = 10) -> list[dict]:
     """Returns top vehicles ranked by violation count.

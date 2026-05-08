@@ -1,10 +1,11 @@
 -- Motive Alerts Bot — Database Schema
 
 CREATE TABLE IF NOT EXISTS companies (
-    id         SERIAL PRIMARY KEY,
-    slug       VARCHAR(50)  UNIQUE NOT NULL,
-    name       VARCHAR(255) NOT NULL,
-    created_at TIMESTAMPTZ  DEFAULT NOW()
+    id                      SERIAL PRIMARY KEY,
+    slug                    VARCHAR(50)  UNIQUE NOT NULL,
+    name                    VARCHAR(255) NOT NULL,
+    speeding_min_severity   VARCHAR(20)  NOT NULL DEFAULT 'high',
+    created_at              TIMESTAMPTZ  DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS company_groups (

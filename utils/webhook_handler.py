@@ -12,7 +12,7 @@ from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
 from aiogram.utils.exceptions import NetworkError, TelegramAPIError, RetryAfter, MigrateToChat
 
 from data import config
-from utils.db_api.companies import get_groups_for_event, get_company_name
+from utils.db_api.companies import get_groups_for_event, get_company_name, get_speeding_min_severity
 from utils.db_api.violations import save_violation
 from utils.db_api.admins import get_subscribed_admins
 
@@ -59,6 +59,9 @@ ALLOWED_TYPES = set(EVENT_TYPE_MAP.keys())
 # Motive speeding webhook uses "action" field with these values
 SPEEDING_ACTIONS = {"speeding_event_created", "speeding_event_updated"}
 
+# Severity ordering for threshold filtering
+SEVERITY_ORDER = ["low", "medium", "high", "critical"]
+
 
 def _kph_to_mph(kph: float) -> float:
     return kph * 0.621371
@@ -77,7 +80,14 @@ def _get_event_type(event: dict) -> str:
     action = (event.get("action") or "").lower()
     if action in SPEEDING_ACTIONS:
         return "speeding"
-    return (event.get("type") or "").lower()
+    event_type = (event.get("type") or "").lower()
+    # Motive sends collisions as hard_brake with critical severity
+    if event_type == "hard_brake":
+        meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
+        sev = meta_sev or (event.get("severity") or "").strip().lower()
+        if sev == "critical":
+            return "crash"
+    return event_type
 
 
 def _get_vehicle(event: dict) -> str:
@@ -182,9 +192,11 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
         if event_type == "speeding":
             meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
             sev = meta_sev or (event.get("severity") or "").strip().lower()
-            allowed_severities = {"critical", "high", "medium"} if company_slug == "nur1" else {"critical", "high"}
+            min_sev = await get_speeding_min_severity(company_slug)
+            min_idx = SEVERITY_ORDER.index(min_sev) if min_sev in SEVERITY_ORDER else 2
+            allowed_severities = set(SEVERITY_ORDER[min_idx:])
             if sev and sev not in allowed_severities:
-                logger.info(f"Ignored speeding event {event_id} severity='{sev}' (below threshold)")
+                logger.info(f"Ignored speeding event {event_id} severity='{sev}' (below threshold for {company_slug})")
                 return
 
         logger.info(f"Processing event {event_id} type={event_type}")

@@ -36,6 +36,18 @@ async def get_accessible_companies(telegram_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_company_slug_by_group(telegram_group_id: int) -> str | None:
+    row = await db.fetchrow(
+        """
+        SELECT c.slug FROM companies c
+        JOIN company_groups cg ON cg.company_id = c.id
+        WHERE cg.telegram_group_id = $1
+        """,
+        telegram_group_id,
+    )
+    return row["slug"] if row else None
+
+
 async def get_groups_for_event(company_slug: str, event_type: str) -> list[int]:
     """
     Returns telegram_group_ids that should receive this event type for the given company.
@@ -61,3 +73,24 @@ async def get_groups_for_event(company_slug: str, event_type: str) -> list[int]:
         company_slug, event_type,
     )
     return [r["telegram_group_id"] for r in rows]
+
+
+async def get_speeding_min_severity(slug: str) -> str:
+    """Returns the minimum severity level for speeding alerts (e.g., 'high', 'medium', 'critical')."""
+    row = await db.fetchrow("SELECT speeding_min_severity FROM companies WHERE slug = $1", slug)
+    return row["speeding_min_severity"] if row else "high"
+
+
+async def get_group_event_types(telegram_group_id: int) -> list[str]:
+    """Returns the list of event types configured for a group. Empty list = all types allowed."""
+    rows = await db.fetch(
+        """
+        SELECT get.event_type
+        FROM group_event_types get
+        JOIN company_groups cg ON cg.id = get.group_id
+        WHERE cg.telegram_group_id = $1
+        ORDER BY get.event_type
+        """,
+        telegram_group_id,
+    )
+    return [r["event_type"] for r in rows]
