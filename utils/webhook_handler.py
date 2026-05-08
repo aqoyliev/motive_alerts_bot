@@ -9,7 +9,7 @@ import aiohttp
 from aiohttp import web
 from aiogram import Bot
 from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
-from aiogram.utils.exceptions import NetworkError, TelegramAPIError, RetryAfter
+from aiogram.utils.exceptions import NetworkError, TelegramAPIError, RetryAfter, MigrateToChat
 
 from data import config
 from utils.db_api.companies import get_groups_for_event, get_company_name
@@ -231,6 +231,15 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
         logger.error(f"Event handling error: {e}", exc_info=True)
 
 
+async def _migrate_group(old_id: int, new_id: int) -> None:
+    from utils.db_api import db
+    await db.execute(
+        "UPDATE company_groups SET telegram_group_id = $1 WHERE telegram_group_id = $2",
+        new_id, old_id,
+    )
+    logger.info(f"DB updated: group {old_id} → {new_id}")
+
+
 async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[str] = None,
                            image_urls: list[str] = None, retries: int = 3, delay: float = 5.0):
     """Send alert to a single chat. Tries videos/images by URL; falls back to text+links on failure."""
@@ -270,6 +279,10 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[s
                 try:
                     await _try_send_group(downloaded)
                     return
+                except MigrateToChat as e:
+                    logger.warning(f"Group {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB and retrying")
+                    await _migrate_group(chat_id, e.migrate_to_chat_id)
+                    chat_id = e.migrate_to_chat_id
                 except RetryAfter as e:
                     logger.warning(f"Flood control (media) for {chat_id}, waiting {e.timeout}s")
                     await asyncio.sleep(e.timeout + 1)
@@ -283,6 +296,10 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[s
             try:
                 await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
                 return
+            except MigrateToChat as e:
+                logger.warning(f"Group {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB and retrying")
+                await _migrate_group(chat_id, e.migrate_to_chat_id)
+                chat_id = e.migrate_to_chat_id
             except RetryAfter as e:
                 logger.warning(f"Flood control (text) for {chat_id}, waiting {e.timeout}s")
                 await asyncio.sleep(e.timeout + 1)
@@ -293,6 +310,10 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[s
         try:
             await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
             return
+        except MigrateToChat as e:
+            logger.warning(f"Group {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB and retrying")
+            await _migrate_group(chat_id, e.migrate_to_chat_id)
+            chat_id = e.migrate_to_chat_id
         except RetryAfter as e:
             logger.warning(f"Flood control (text-only) for {chat_id}, waiting {e.timeout}s")
             await asyncio.sleep(e.timeout + 1)
