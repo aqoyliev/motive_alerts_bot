@@ -8,11 +8,13 @@ from utils.db_api.admins import is_super_admin
 @dp.message_handler(CommandHelp())
 async def bot_help(message: types.Message):
     text = [
-        "📋 <b>Motive Alerts Bot</b>\n",
+        "📋 <b>HF Alerts Bot</b>\n",
         "This bot monitors your fleet and reports safety violations.\n",
         "<b>Commands:</b>",
         "/start — Open the main menu",
-        "/help — Show this help message\n",
+        "/help — Show this help message",
+        "/report today | yesterday — Violations grouped by event type",
+        "/top [N] — Top N violators today (default 10, max 50)\n",
         "<b>Violations Report</b>",
         "From the main menu, tap <b>Violations Report</b> to view top offending units.",
         "• Choose <b>Speeding</b> or <b>Other Violations</b>",
