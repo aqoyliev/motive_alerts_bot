@@ -135,24 +135,21 @@ def _verify_hmac(secret: str, body: bytes, provided: str) -> bool:
 
 
 async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict | None:
-    """Poll harsh event API waiting for video URLs.
+    """Poll harsh event API waiting for video URLs. Every attempt waits 20s first.
 
-    Standard harsh events: up to 3 attempts (~40s). First call is immediate;
-    subsequent attempts wait 20s.
-    Crashes: once detected, window extends to 45 attempts (~15 min) with no
-    early-bail — crash clips are large and routinely take 5-10+ minutes to
-    upload from the truck."""
+    Standard harsh events: up to 3 attempts (~60s).
+    Crashes: once detected, window extends to 15 attempts (~5 min) with no
+    early-bail — crash clips are large and take a few minutes to upload."""
     url = f"https://api.samsara.com/v1/fleet/vehicles/{vehicle_id}/safety/harsh_event"
     headers = {"Authorization": f"Bearer {config.SAMSARA_API_KEY}"}
     last_data = None
     ever_got_url = False
     is_crash = False
-    max_attempts = 3  # bumped to 45 once a Crash is detected
+    max_attempts = 3  # bumped to 15 once a Crash is detected
     attempt = 0
     while attempt < max_attempts:
         attempt += 1
-        if attempt > 1:
-            await asyncio.sleep(20)
+        await asyncio.sleep(20)
         try:
             async with _http_session.get(url, headers=headers, params={"timestamp": timestamp_ms}) as r:
                 if r.status == 200:
@@ -164,8 +161,8 @@ async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict
                         return None
                     if harsh_type == "Crash" and not is_crash:
                         is_crash = True
-                        max_attempts = 45  # ~15 min total at 20s intervals
-                        logger.info(f"[samsara] Crash detected — extending poll window to {max_attempts} attempts (~15 min)")
+                        max_attempts = 15  # ~5 min total at 20s intervals
+                        logger.info(f"[samsara] Crash detected — extending poll window to {max_attempts} attempts (~5 min)")
                     fwd = data.get("downloadForwardVideoUrl") or ""
                     inward = data.get("downloadInwardVideoUrl") or ""
                     resolved_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "")
