@@ -35,17 +35,24 @@ def _period_range(period: str) -> tuple[datetime, datetime]:
     return since, until
 
 
-def _format_top10_text(rows: list[dict], period_label: str, company_name: str, event_type: str) -> str:
+def _date_range_label(since: datetime, until: datetime) -> str:
+    # until is exclusive (start of the next period), so the last covered day is until - 1
+    end = until - timedelta(days=1)
+    if since.year == end.year:
+        return f"{since.strftime('%b %d')} – {end.strftime('%b %d, %Y')}"
+    return f"{since.strftime('%b %d, %Y')} – {end.strftime('%b %d, %Y')}"
+
+
+def _format_top10_text(rows: list[dict], date_label: str, company_name: str, event_type: str) -> str:
     if event_type == "speeding":
         header = (
-            f"📊 <b>{company_name} — {period_label}</b>\n"
+            f"📊 <b>{company_name} — {date_label}</b>\n"
             f"<i>🚨 Speeding only</i>\n"
-            f"<i>ℹ️ Download report shows days with 3+ speeding events per unit</i>\n"
         )
     elif event_type == "other":
-        header = f"📊 <b>{company_name} — {period_label}</b>\n<i>⚠️ Other violations (excl. speeding)</i>\n"
+        header = f"📊 <b>{company_name} — {date_label}</b>\n<i>⚠️ Other violations (excl. speeding)</i>\n"
     else:
-        header = f"📊 <b>{company_name} — {period_label}</b>\n"
+        header = f"📊 <b>{company_name} — {date_label}</b>\n"
 
     if not rows:
         return header + "\n✅ No violations found."
@@ -60,7 +67,7 @@ async def _show_top10(call: types.CallbackQuery, company_slug: str, period: str,
     company_name = await _get_company_name(company_slug) or company_slug
     since, until = _period_range(period)
     rows = await get_top_violators(company_slug, since, until=until, event_type=event_type, limit=10)
-    text = _format_top10_text(rows, PERIOD_LABELS[period], company_name, event_type)
+    text = _format_top10_text(rows, _date_range_label(since, until), company_name, event_type)
     kb = top10_keyboard(rows, company_slug, period, event_type)
     await edit_or_send(call, text, kb)
     await call.answer()
