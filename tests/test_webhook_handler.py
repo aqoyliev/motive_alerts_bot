@@ -1,6 +1,8 @@
 from utils.webhook_handler import (
     ALLOWED_TYPES,
     _clean_vehicle,
+    _event_id_to_bigint,
+    _format_event,
     _get_event_type,
     _get_vehicle,
 )
@@ -81,3 +83,52 @@ def test_allowed_types_includes_core_events():
 
 def test_allowed_types_excludes_tailgating():
     assert "tailgating" not in ALLOWED_TYPES
+
+
+# ── _event_id_to_bigint ──────────────────────────────────────────────────────────
+
+def test_event_id_bigint_numeric_passthrough():
+    # Motive ids are numeric and must map to themselves so dedup matches the raw id.
+    assert _event_id_to_bigint("123456789") == 123456789
+    assert _event_id_to_bigint(123456789) == 123456789
+
+def test_event_id_bigint_uuid_is_stable():
+    # Samsara UUIDs must hash to the same int every call so the UNIQUE constraint dedups.
+    u = "86f91905-f4b7-4a32-8d63-26bece8b7cb2"
+    assert _event_id_to_bigint(u) == _event_id_to_bigint(u)
+
+def test_event_id_bigint_uuid_fits_signed_64bit():
+    # Must fit a Postgres BIGINT (signed 64-bit) or the INSERT raises NumericValueOutOfRange.
+    val = _event_id_to_bigint("86f91905-f4b7-4a32-8d63-26bece8b7cb2")
+    assert isinstance(val, int)
+    assert -(2 ** 63) <= val < 2 ** 63
+
+def test_event_id_bigint_distinct_uuids_differ():
+    a = _event_id_to_bigint("86f91905-f4b7-4a32-8d63-26bece8b7cb2")
+    b = _event_id_to_bigint("00000000-0000-0000-0000-000000000000")
+    assert a != b
+
+def test_event_id_bigint_empty_returns_none():
+    assert _event_id_to_bigint("") is None
+    assert _event_id_to_bigint(None) is None
+
+
+# ── _format_event HTML escaping ───────────────────────────────────────────────────
+
+def test_format_event_escapes_driver_and_location():
+    # Unescaped &, <, > would make Telegram reject the whole message (parse_mode=HTML),
+    # so dynamic values must be escaped while the layout's own tags stay intact.
+    event = {
+        "action": "driver_performance_event_created",
+        "type": "hard_brake",
+        "driver": {"name": "Tom & <Jerry>"},
+        "location": "5th & Main <St>",
+    }
+    out = _format_event(event)
+    assert "Tom &amp; &lt;Jerry&gt;" in out
+    assert "5th &amp; Main &lt;St&gt;" in out
+    # the raw, unescaped forms must not survive into the message
+    assert "Tom & <Jerry>" not in out
+    assert "5th & Main <St>" not in out
+    # layout tags are still real HTML
+    assert "<b>" in out and "</b>" in out

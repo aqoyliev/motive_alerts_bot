@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import hmac
+import html
 import io
 import json
 import logging
@@ -12,7 +13,25 @@ import aiohttp
 from aiohttp import web
 from aiogram import Bot
 from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
-from aiogram.utils.exceptions import NetworkError, TelegramAPIError, RetryAfter, MigrateToChat
+from aiogram.utils.exceptions import (
+    BadRequest,
+    BotBlocked,
+    BotKicked,
+    CantInitiateConversation,
+    ChatNotFound,
+    MigrateToChat,
+    NetworkError,
+    RetryAfter,
+    TelegramAPIError,
+    UserDeactivated,
+)
+
+# Telegram errors that mean the chat is permanently unreachable — never retry these.
+_UNREACHABLE_ERRORS = (BotBlocked, BotKicked, UserDeactivated, CantInitiateConversation, ChatNotFound)
+
+# Telegram bot upload size limits (downloaded media larger than this is rejected by the API).
+_MAX_VIDEO_BYTES = 50 * 1024 * 1024
+_MAX_PHOTO_BYTES = 10 * 1024 * 1024
 
 from data import config
 from utils.db_api.companies import get_groups_for_event, get_company_name, update_group_chat_id
@@ -41,6 +60,23 @@ def _is_duplicate(event_id: str) -> bool:
         return True
     _seen_event_ids[event_id] = now
     return False
+
+
+def _event_id_to_bigint(raw) -> int | None:
+    """Map a provider event id onto the violations.event_id BIGINT UNIQUE column.
+
+    Motive ids are numeric and pass through unchanged. Samsara ids are UUID strings
+    which won't fit a BIGINT, so they were previously stored as NULL — and NULLs never
+    conflict, so ON CONFLICT (event_id) DO NOTHING gave Samsara no persistent dedup at
+    all (only the ~5-min in-memory window). Hashing the string into a stable signed
+    64-bit int makes the UNIQUE constraint work for Samsara too, surviving restarts."""
+    s = str(raw or "")
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s)
+    digest = hashlib.blake2b(s.encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big", signed=True)
 
 
 async def _download(url: str) -> bytes | None:
@@ -200,22 +236,23 @@ def _get_vehicle(event: dict) -> str:
     )
 
 
+_UNIT_PREFIX_RE = re.compile(r'^unit[\s:#-]+', re.IGNORECASE)
+
+
+def _strip_unit_prefix(v: str) -> str:
+    """Strip a leading unit/UNIT/unit:/unit#/unit- prefix (any case). Single source of
+    truth so the saved vehicle_number and the displayed vehicle always agree."""
+    return _UNIT_PREFIX_RE.sub('', (v or "").strip()).strip()
+
+
 def _get_unit_num(event: dict) -> str:
-    v = _get_vehicle(event).strip()
-    low = v.lower()
-    for pfx in ("unit ", "unit:", "unit#"):
-        if low.startswith(pfx):
-            v = v[len(pfx):].strip()
-            break
+    v = _strip_unit_prefix(_get_vehicle(event))
     return v.split()[0] if v else "?"
 
 
-_UNIT_PREFIX_RE = re.compile(r'^unit[\s:#-]+', re.IGNORECASE)
-
 def _clean_vehicle(event: dict) -> str:
     """Return full vehicle string with leading unit prefix stripped, truncated to 50 chars."""
-    v = _get_vehicle(event).strip()
-    return _UNIT_PREFIX_RE.sub('', v).strip()[:50]
+    return _strip_unit_prefix(_get_vehicle(event))[:50]
 
 
 def _format_event(event: dict, company_name: str = "") -> str:
@@ -241,27 +278,25 @@ def _format_event(event: dict, company_name: str = "") -> str:
     meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip()
     sev_display = meta_sev or (event.get("severity") or "").strip()
 
-    lines = [f"{emoji} <b>{title}</b>\n"]
+    # All dynamic values are HTML-escaped: parse_mode="HTML" means an unescaped
+    # '&', '<' or '>' in a driver name, location or company name makes Telegram
+    # reject the whole message ("can't parse entities") and the alert is lost.
+    lines = [f"{emoji} <b>{html.escape(title)}</b>\n"]
     if company_name and event_type == "crash":
-        lines.append(company_name)
-    v = vehicle.strip()
-    low = v.lower()
-    for _pfx in ("unit ", "unit:", "unit#"):
-        if low.startswith(_pfx):
-            v = v[len(_pfx):].strip()
-            break
+        lines.append(html.escape(company_name))
+    v = _strip_unit_prefix(vehicle)
     if " " in v:
         num, rest = v.split(" ", 1)
-        vehicle_fmt = f"<code>{num}</code> <code>{rest}</code>"
+        vehicle_fmt = f"<code>{html.escape(num)}</code> <code>{html.escape(rest)}</code>"
     else:
-        vehicle_fmt = f"<code>{v}</code>" if v else "—"
+        vehicle_fmt = f"<code>{html.escape(v)}</code>" if v else "—"
     lines.append(vehicle_fmt)
     if driver and driver != "Unidentified":
-        lines.append(f"👤 <b>Driver:</b> {driver}")
+        lines.append(f"👤 <b>Driver:</b> {html.escape(driver)}")
     if sev_display and event_type not in {"driver_facing_cam_obstruction", "road_facing_cam_obstruction"}:
         sev_emoji = SEVERITY_EMOJI.get(sev_display.lower(), "⚠️")
-        lines.append(f"📊 <b>Severity:</b> {sev_emoji} {sev_display.title()}")
-    lines.append(f"🕐 <b>Time:</b> {start_time}")
+        lines.append(f"📊 <b>Severity:</b> {sev_emoji} {html.escape(sev_display.title())}")
+    lines.append(f"🕐 <b>Time:</b> {html.escape(start_time)}")
 
     if event_type == "speeding":
         avg = event.get("avg_vehicle_speed")
@@ -277,12 +312,12 @@ def _format_event(event: dict, company_name: str = "") -> str:
             lines.append(f"⏱ <b>Duration:</b> {duration}s")
         nominatim = event.get("nominatim_location", "")
         if nominatim:
-            lines.append(f"📍 <b>Location:</b> {nominatim}")
+            lines.append(f"📍 <b>Location:</b> {html.escape(nominatim)}")
     else:
         if location:
-            lines.append(f"📍 <b>Location:</b> {location}")
+            lines.append(f"📍 <b>Location:</b> {html.escape(location)}")
         if event_type == "hard_brake" and intensity:
-            lines.append(f"💥 <b>Intensity:</b> {intensity}")
+            lines.append(f"💥 <b>Intensity:</b> {html.escape(str(intensity))}")
         if duration:
             lines.append(f"⏱ <b>Duration:</b> {duration}s")
 
@@ -382,14 +417,17 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
             company_slug=company_slug,
             vehicle_number=vehicle_number,
             event_type=event_type,
-            event_id=int(event["id"]) if str(event.get("id") or "").isdigit() else None,
+            event_id=_event_id_to_bigint(event.get("id")),
             occurred_at=occurred_at,
             severity=severity,
         )
 
         group_ids = await get_groups_for_event(company_slug, event_type)
-        if not group_ids:
-            logger.info(f"No groups configured for company='{company_slug}' event='{event_type}' — skipping")
+        dm_ids = await get_subscribed_admins(event_type, company_slug)
+        if not group_ids and not dm_ids:
+            # Previously this returned when there were no groups, even if admins were
+            # subscribed for DMs — so DM-only configs got nothing. Check both.
+            logger.info(f"No targets for company='{company_slug}' event='{event_type}' — skipping")
             return
 
         company_display = await get_company_name(company_slug) or company_slug.title()
@@ -401,30 +439,81 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
 
         is_video = bool(video_urls)
         media_urls = video_urls or image_urls or []
+        size_limit = _MAX_VIDEO_BYTES if is_video else _MAX_PHOTO_BYTES
 
         media = []
         for i, url in enumerate(media_urls):
             data = await _download(url)
-            if data:
-                logger.info(f"Downloaded {len(data)} bytes for media_{i+1}")
-                media.append(data)
-            else:
+            if not data:
                 logger.error(f"Download failed for media_{i+1}: {url}")
+                continue
+            if len(data) > size_limit:
+                logger.warning(f"media_{i+1} is {len(data)} bytes (> {size_limit} limit) — "
+                               f"Telegram would reject it; skipping, alert will be text-only")
+                continue
+            logger.info(f"Downloaded {len(data)} bytes for media_{i+1}")
+            media.append(data)
 
-        for chat_id in group_ids:
-            await _send_with_retry(bot, chat_id, text, is_video, media)
-
-        dm_ids = await get_subscribed_admins(event_type, company_slug)
-        for telegram_id in dm_ids:
-            await _send_with_retry(bot, telegram_id, text, is_video, media)
+        # Upload the media once, then reuse the returned Telegram file_id for every other
+        # recipient instead of re-uploading the same (potentially large) clip N times.
+        sent_file_ids = None
+        for chat_id in [*group_ids, *dm_ids]:
+            payload = sent_file_ids if sent_file_ids is not None else media
+            result = await _send_with_retry(bot, chat_id, text, is_video, payload)
+            if result and sent_file_ids is None:
+                sent_file_ids = result
 
     except Exception as e:
         logger.error(f"Event handling error: {e}", exc_info=True)
 
 
+def _extract_file_ids(messages: list, is_video: bool) -> list | None:
+    """Pull the Telegram file_id(s) out of sent message(s) so they can be reused
+    for the remaining recipients without re-uploading."""
+    ids = []
+    for m in messages:
+        if is_video and getattr(m, "video", None):
+            ids.append(m.video.file_id)
+        elif not is_video and getattr(m, "photo", None):
+            ids.append(m.photo[-1].file_id)
+    return ids or None
+
+
+async def _send_text(bot: Bot, chat_id: int, text: str, retries: int, delay: float) -> None:
+    """Send a text-only message with flood-control / network retries. Permanent errors
+    (chat unreachable, bad request) are not retried — the same message would fail again."""
+    for attempt in range(1, retries + 1):
+        try:
+            await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
+            return
+        except RetryAfter as e:
+            logger.warning(f"Flood control (text) for {chat_id}, waiting {e.timeout}s")
+            await asyncio.sleep(e.timeout + 1)
+        except MigrateToChat as e:
+            logger.warning(f"Chat {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB")
+            await update_group_chat_id(chat_id, e.migrate_to_chat_id)
+            chat_id = e.migrate_to_chat_id
+        except _UNREACHABLE_ERRORS as e:
+            logger.error(f"Chat {chat_id} unreachable ({type(e).__name__}: {e}) — giving up")
+            return
+        except BadRequest as e:
+            logger.error(f"Text rejected for {chat_id} ({e}) — giving up (retrying identical text won't help)")
+            return
+        except NetworkError as e:
+            if attempt < retries:
+                logger.warning(f"NetworkError sending to {chat_id} (attempt {attempt}/{retries}): {e} — retrying in {delay}s")
+                await asyncio.sleep(delay)
+            else:
+                logger.error(f"NetworkError sending to {chat_id} after {retries} attempts: {e}")
+
+
 async def _send_with_retry(bot: Bot, chat_id: int, text: str, is_video: bool = False,
-                           media: list = None, retries: int = 3, delay: float = 5.0):
-    """Send alert to a single chat. media is a list of URL strings or bytes objects."""
+                           media: list = None, retries: int = 3, delay: float = 5.0) -> list | None:
+    """Send alert to a single chat. `media` is a list of raw bytes (uploaded) or
+    Telegram file_id strings (reused from a prior send — no re-upload).
+
+    Returns the file_id(s) of the media just sent so the caller can reuse them for the
+    other recipients, or None if nothing reusable was sent."""
     media = media or []
 
     if media:
@@ -432,22 +521,23 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, is_video: bool = F
         MediaType = InputMediaVideo if is_video else InputMediaPhoto
 
         def _to_file(i: int, src):
+            # bytes → fresh upload; str (file_id/URL) → passed through, served by Telegram
             return InputFile(io.BytesIO(src), filename=f"media_{i+1}.{ext}") if isinstance(src, bytes) else src
 
-        async def _try_send_group():
+        async def _try_send_group() -> list | None:
             if len(media) == 1:
                 send_fn = bot.send_video if is_video else bot.send_photo
-                await send_fn(chat_id, _to_file(0, media[0]), caption=text, parse_mode="HTML")
-            else:
-                items = [MediaType(_to_file(i, s), caption=text if i == 0 else None,
-                                   parse_mode="HTML" if i == 0 else None)
-                         for i, s in enumerate(media)]
-                await bot.send_media_group(chat_id, items)
+                msg = await send_fn(chat_id, _to_file(0, media[0]), caption=text, parse_mode="HTML")
+                return _extract_file_ids([msg], is_video)
+            items = [MediaType(_to_file(i, s), caption=text if i == 0 else None,
+                               parse_mode="HTML" if i == 0 else None)
+                     for i, s in enumerate(media)]
+            msgs = await bot.send_media_group(chat_id, items)
+            return _extract_file_ids(msgs, is_video)
 
-        for attempt in range(3):
+        for attempt in range(1, retries + 1):
             try:
-                await _try_send_group()
-                return
+                return await _try_send_group()
             except RetryAfter as e:
                 logger.warning(f"Flood control (media) for {chat_id}, waiting {e.timeout}s")
                 await asyncio.sleep(e.timeout + 1)
@@ -455,43 +545,27 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, is_video: bool = F
                 logger.warning(f"Group {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB")
                 await update_group_chat_id(chat_id, e.migrate_to_chat_id)
                 chat_id = e.migrate_to_chat_id
+            except _UNREACHABLE_ERRORS as e:
+                logger.error(f"Chat {chat_id} unreachable ({type(e).__name__}: {e}) — giving up, not retrying")
+                return None
+            except BadRequest as e:
+                # Permanent for this payload (caption too long, bad media, parse error) —
+                # don't retry the same media; fall through to a text-only attempt.
+                logger.warning(f"Media rejected for {chat_id} ({e}) — falling back to text")
+                break
             except (TimeoutError, NetworkError, TelegramAPIError) as e:
-                logger.warning(f"Media send failed for {chat_id} (attempt {attempt+1}/3): {e} — retrying")
-                await asyncio.sleep(5)
+                logger.warning(f"Media send failed for {chat_id} (attempt {attempt}/{retries}): {e}")
+                if attempt < retries:
+                    await asyncio.sleep(delay)
 
         # Last resort: text only so the alert is never lost
-        logger.error(f"All media failed for {chat_id}, sending text only")
-        for attempt in range(3):
-            try:
-                await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
-                return
-            except RetryAfter as e:
-                logger.warning(f"Flood control (text) for {chat_id}, waiting {e.timeout}s")
-                await asyncio.sleep(e.timeout + 1)
-            except MigrateToChat as e:
-                logger.warning(f"Group {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB")
-                await update_group_chat_id(chat_id, e.migrate_to_chat_id)
-                chat_id = e.migrate_to_chat_id
-        return
+        logger.error(f"Media undeliverable for {chat_id}, sending text only")
+        await _send_text(bot, chat_id, text, retries, delay)
+        return None
 
     # No media — send text only
-    for attempt in range(1, retries + 1):
-        try:
-            await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
-            return
-        except RetryAfter as e:
-            logger.warning(f"Flood control (text-only) for {chat_id}, waiting {e.timeout}s")
-            await asyncio.sleep(e.timeout + 1)
-        except MigrateToChat as e:
-            logger.warning(f"Group {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB")
-            await update_group_chat_id(chat_id, e.migrate_to_chat_id)
-            chat_id = e.migrate_to_chat_id
-        except NetworkError as e:
-            if attempt < retries:
-                logger.warning(f"NetworkError sending to {chat_id} (attempt {attempt}/{retries}): {e} — retrying in {delay}s")
-                await asyncio.sleep(delay)
-            else:
-                logger.error(f"NetworkError sending to {chat_id} after {retries} attempts: {e}")
+    await _send_text(bot, chat_id, text, retries, delay)
+    return None
 
 
 # ── Samsara ──────────────────────────────────────────────────────────────────
@@ -639,11 +713,6 @@ async def motive_webhook(request: web.Request) -> web.Response:
             logger.info(f"Webhook verification ping: {body}")
             return web.Response(text="OK", status=200)
 
-        event_id = (body if isinstance(body, dict) else {}).get("id") or ""
-        if _is_duplicate(event_id):
-            logger.info(f"[motive] Duplicate event id={event_id} — skipping")
-            return web.Response(text="OK", status=200)
-
         items = body if isinstance(body, list) else [body]
 
         for item in items:
@@ -656,6 +725,12 @@ async def motive_webhook(request: web.Request) -> web.Response:
                 or item.get("event")
                 or item
             )
+            # Dedup per item: a batched payload (list) carries no top-level id, so
+            # deduping there missed batches entirely. Key off each event's own id.
+            item_id = str(event.get("id") or item.get("id") or "")
+            if _is_duplicate(item_id):
+                logger.info(f"[motive] Duplicate event id={item_id} — skipping")
+                continue
             event_type = _get_event_type(event)
             if event_type not in ALLOWED_TYPES:
                 logger.debug(f"Unhandled event type='{event_type}' keys={list(event.keys())} payload={json.dumps(event, default=str)[:500]}")
