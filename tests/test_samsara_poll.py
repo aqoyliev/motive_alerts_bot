@@ -134,7 +134,6 @@ def _patch_handle_event_deps(monkeypatch, groups, dms):
     monkeypatch.setattr(wh, "save_violation", save)
     monkeypatch.setattr(wh, "get_groups_for_event", AsyncMock(return_value=groups))
     monkeypatch.setattr(wh, "get_subscribed_admins", AsyncMock(return_value=dms))
-    monkeypatch.setattr(wh, "get_company_name", AsyncMock(return_value="HF"))
     monkeypatch.setattr(wh, "_send_text", _fake_send_text)
     monkeypatch.setattr(wh, "_download", AsyncMock(return_value=b"vid"))
     send_full = AsyncMock(return_value=None)
@@ -183,4 +182,18 @@ async def test_handle_event_noncrash_persists_early_without_pending(monkeypatch)
     save.assert_awaited_once()
     assert save.await_args.kwargs["event_type"] == "hard_brake"
     assert sent_text == []          # non-crash → no pending alert
+    assert send_full.await_count == 1
+
+async def test_handle_event_crash_no_media_skips_dm_followup(monkeypatch):
+    save, sent_text, send_full = _patch_handle_event_deps(monkeypatch, groups=[111], dms=[222])
+    # Crash that never produces a clip → polls the full window, no media.
+    monkeypatch.setattr(wh, "_http_session", _session([_resp(json_data={"harshEventType": "Crash"})]))
+
+    await wh._handle_event(MagicMock(), _samsara_event(), company_slug="hf")
+
+    # Instant pending alert still reached both crash targets.
+    assert {cid for cid, _ in sent_text} == {111, 222}
+    # Media-less follow-up: group gets it (adds location), DM is skipped.
+    called_chats = {c.args[1] for c in send_full.await_args_list}
+    assert called_chats == {111}
     assert send_full.await_count == 1

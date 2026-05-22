@@ -34,7 +34,7 @@ _MAX_VIDEO_BYTES = 50 * 1024 * 1024
 _MAX_PHOTO_BYTES = 10 * 1024 * 1024
 
 from data import config
-from utils.db_api.companies import get_groups_for_event, get_company_name, update_group_chat_id
+from utils.db_api.companies import get_groups_for_event, update_group_chat_id
 from utils.db_api.violations import save_violation
 from utils.db_api.admins import get_subscribed_admins
 
@@ -313,7 +313,7 @@ def _vehicle_code_line(vehicle: str) -> str:
     return f"<code>{html.escape(v)}</code>"
 
 
-def _format_event(event: dict, company_name: str = "") -> str:
+def _format_event(event: dict) -> str:
     event_type = _get_event_type(event)
     emoji, title = EVENT_TYPE_MAP.get(event_type, ("🚨", event_type.upper().replace("_", " ")))
 
@@ -337,11 +337,9 @@ def _format_event(event: dict, company_name: str = "") -> str:
     sev_display = meta_sev or (event.get("severity") or "").strip()
 
     # All dynamic values are HTML-escaped: parse_mode="HTML" means an unescaped
-    # '&', '<' or '>' in a driver name, location or company name makes Telegram
-    # reject the whole message ("can't parse entities") and the alert is lost.
+    # '&', '<' or '>' in a driver name or location makes Telegram reject the whole
+    # message ("can't parse entities") and the alert is lost.
     lines = [f"{emoji} <b>{html.escape(title)}</b>\n"]
-    if company_name and event_type == "crash":
-        lines.append(html.escape(company_name))
     lines.append(_vehicle_code_line(vehicle))
     if driver and driver != "Unidentified":
         lines.append(f"👤 <b>Driver:</b> {html.escape(driver)}")
@@ -534,8 +532,7 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
             logger.info(f"No targets for company='{company_slug}' event='{event_type}' — skipping")
             return
 
-        company_display = await get_company_name(company_slug) or company_slug.title()
-        text = _format_event(event, company_display)
+        text = _format_event(event)
         video_urls, image_urls = _get_camera_media_info(event)
 
         if not video_urls and not image_urls and event.get("camera_media") is None and event_type != "speeding":
@@ -560,12 +557,26 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
 
         # Upload the media once, then reuse the returned Telegram file_id for every other
         # recipient instead of re-uploading the same (potentially large) clip N times.
+        # Groups go first so the file_id exists before DMs reuse it.
         sent_file_ids = None
-        for chat_id in [*group_ids, *dm_ids]:
+        for chat_id in group_ids:
             payload = sent_file_ids if sent_file_ids is not None else media
             result = await _send_with_retry(bot, chat_id, text, is_video, payload)
             if result and sent_file_ids is None:
                 sent_file_ids = result
+
+        # For a crash we already DM'd an instant "video pending" alert. If no media ever
+        # resolved, the follow-up is just text — skip it for DMs so private chats aren't
+        # double-texted. Groups still get the fuller card (it adds the location).
+        skip_dm_followup = persisted_type == "crash" and not media
+        if skip_dm_followup and dm_ids:
+            logger.info(f"[samsara] Crash had no media — skipping text-only follow-up for {len(dm_ids)} DM(s)")
+        else:
+            for telegram_id in dm_ids:
+                payload = sent_file_ids if sent_file_ids is not None else media
+                result = await _send_with_retry(bot, telegram_id, text, is_video, payload)
+                if result and sent_file_ids is None:
+                    sent_file_ids = result
 
     except Exception as e:
         logger.error(f"Event handling error: {e}", exc_info=True)
