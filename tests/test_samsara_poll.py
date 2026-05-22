@@ -92,3 +92,95 @@ async def test_standard_event_no_media_bails_at_three(monkeypatch):
     result = await wh._fetch_samsara_harsh_event("veh1", 123)
     assert session.get.call_count == 3
     assert result == data  # sends with no media rather than losing the alert
+
+
+# ── on_first hook ─────────────────────────────────────────────────────────────────
+
+async def test_on_first_invoked_once_with_first_typed_response(monkeypatch):
+    data = {"harshEventType": "Harsh Braking",
+            "downloadForwardVideoUrl": "f", "downloadInwardVideoUrl": "i"}
+    _install(monkeypatch, [_resp(json_data=data)])
+    hook = AsyncMock()
+    await wh._fetch_samsara_harsh_event("veh1", 123, on_first=hook)
+    hook.assert_awaited_once()
+    assert hook.await_args.args[0] == data
+
+async def test_on_first_not_invoked_on_obstructed(monkeypatch):
+    _install(monkeypatch, [_resp(json_data={"harshEventType": "Obstructed Camera"})])
+    hook = AsyncMock()
+    result = await wh._fetch_samsara_harsh_event("veh1", 123, on_first=hook)
+    assert result is None
+    hook.assert_not_awaited()  # obstructed events are dropped before the hook
+
+async def test_on_first_invoked_once_across_crash_window(monkeypatch):
+    # Crash with no media ever: polls the full 15-attempt window but the hook (which
+    # persists + fires the pending alert) must fire exactly once.
+    session = _install(monkeypatch, [_resp(json_data={"harshEventType": "Crash"})])
+    hook = AsyncMock()
+    await wh._fetch_samsara_harsh_event("veh1", 123, on_first=hook)
+    assert session.get.call_count == 15
+    hook.assert_awaited_once()
+
+
+# ── _handle_event: early persist + crash pending ──────────────────────────────────
+
+def _patch_handle_event_deps(monkeypatch, groups, dms):
+    save = AsyncMock()
+    sent_text = []
+
+    async def _fake_send_text(bot, chat_id, text, retries, delay):
+        sent_text.append((chat_id, text))
+
+    monkeypatch.setattr(wh, "save_violation", save)
+    monkeypatch.setattr(wh, "get_groups_for_event", AsyncMock(return_value=groups))
+    monkeypatch.setattr(wh, "get_subscribed_admins", AsyncMock(return_value=dms))
+    monkeypatch.setattr(wh, "get_company_name", AsyncMock(return_value="HF"))
+    monkeypatch.setattr(wh, "_send_text", _fake_send_text)
+    monkeypatch.setattr(wh, "_download", AsyncMock(return_value=b"vid"))
+    send_full = AsyncMock(return_value=None)
+    monkeypatch.setattr(wh, "_send_with_retry", send_full)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(wh.config, "SAMSARA_API_KEY", "test", raising=False)
+    return save, sent_text, send_full
+
+
+def _samsara_event():
+    return {
+        "id": "uuid-1", "type": "harsh_event", "_source": "samsara",
+        "_samsara_vehicle_id": "v1", "_samsara_timestamp_ms": 123,
+        "vehicle": {"number": "528609"}, "driver": {"name": ""},
+        "start_time": "2026-04-29T09:15:31Z",
+    }
+
+async def test_handle_event_crash_persists_early_and_sends_pending(monkeypatch):
+    save, sent_text, send_full = _patch_handle_event_deps(monkeypatch, groups=[111], dms=[222])
+    # attempt 1: Crash, no media (fires hook → early save + pending)
+    # attempt 2: Crash, both URLs (full card follows)
+    r1 = _resp(json_data={"harshEventType": "Crash"})
+    r2 = _resp(json_data={"harshEventType": "Crash", "downloadForwardVideoUrl": "f",
+                          "downloadInwardVideoUrl": "i", "location": {"address": "I-95 N"}})
+    monkeypatch.setattr(wh, "_http_session", _session([r1, r2]))
+
+    await wh._handle_event(MagicMock(), _samsara_event(), company_slug="hf")
+
+    # persisted exactly once, as a crash, before the poll finished
+    save.assert_awaited_once()
+    assert save.await_args.kwargs["event_type"] == "crash"
+    # pending alert went to both crash targets
+    assert {cid for cid, _ in sent_text} == {111, 222}
+    assert all("Crash detected — video pending" in t for _, t in sent_text)
+    # full card delivered to both targets afterward
+    assert send_full.await_count == 2
+
+async def test_handle_event_noncrash_persists_early_without_pending(monkeypatch):
+    save, sent_text, send_full = _patch_handle_event_deps(monkeypatch, groups=[111], dms=[])
+    data = {"harshEventType": "Harsh Braking", "downloadForwardVideoUrl": "f",
+            "downloadInwardVideoUrl": "i"}
+    monkeypatch.setattr(wh, "_http_session", _session([_resp(json_data=data)]))
+
+    await wh._handle_event(MagicMock(), _samsara_event(), company_slug="hf")
+
+    save.assert_awaited_once()
+    assert save.await_args.kwargs["event_type"] == "hard_brake"
+    assert sent_text == []          # non-crash → no pending alert
+    assert send_full.await_count == 1

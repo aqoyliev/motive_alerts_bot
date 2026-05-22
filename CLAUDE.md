@@ -62,7 +62,9 @@ Events are routed based on `company_slug`. `company_groups` maps a company to Te
 
 ### Motive vs. Samsara differences
 
-Motive sends complete event data in the webhook payload. Samsara webhooks are thin notifications — the handler must make a follow-up API call to `GET /fleet/harsh-events/{id}` to get speed, location, and video URL. This polling happens in a background task with 20s retry intervals.
+Motive sends complete event data in the webhook payload. Samsara webhooks are thin notifications — the handler must make a follow-up API call to `GET /fleet/harsh-events/{id}` to get speed, location, and video URL. This polling happens in a background task (`_fetch_samsara_harsh_event`) with 20s retry intervals: standard harsh events poll up to 3 attempts (~60s), crashes extend to 15 (~5 min) since crash clips upload slowly. Inward-only types (`cell_phone`, `drowsy_driving`, `no_seat_belt`, `inattentive_driving`) short-circuit as soon as the inward clip is ready.
+
+Because the harsh-event *type* (crash vs. hard brake, etc.) only arrives in the first poll response, the violation row is saved then via the `on_first` hook — not after the full poll — so a mid-poll restart can't lose the event. On crash detection the hook also fires an immediate `🚨 Crash detected — video pending` text alert to crash targets; the full card with media follows from the main path once the URLs resolve.
 
 ## Database
 

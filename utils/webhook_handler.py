@@ -176,18 +176,24 @@ def _samsara_signed_payload(timestamp: str, body: bytes) -> bytes:
     return b"v1:" + timestamp.encode() + b":" + body
 
 
-async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict | None:
+async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int, on_first=None) -> dict | None:
     """Poll harsh event API waiting for video URLs. Every attempt waits 20s first.
 
     Standard harsh events: up to 3 attempts (~60s).
     Crashes: once detected, the window extends to 15 attempts (~5 min) with no
     early-bail — crash clips are large and take a few minutes to upload.
-    Inward-only types short-circuit as soon as the inward clip is ready."""
+    Inward-only types short-circuit as soon as the inward clip is ready.
+
+    `on_first`, if given, is an async callback awaited once with the first response
+    that carries a real harshEventType (i.e. the type is now known, before media is
+    ready). The caller uses it to persist the violation row and fire a 'pending'
+    alert, so the event survives a mid-poll restart and crashes notify immediately."""
     url = f"https://api.samsara.com/v1/fleet/vehicles/{vehicle_id}/safety/harsh_event"
     headers = {"Authorization": f"Bearer {config.SAMSARA_API_KEY}"}
     last_data = None
     ever_got_url = False
     is_crash = False
+    notified = False
     max_attempts = 3  # bumped to 15 once a Crash is detected
     attempt = 0
     while attempt < max_attempts:
@@ -206,6 +212,14 @@ async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict
                         is_crash = True
                         max_attempts = 15  # ~5 min total at 20s intervals
                         logger.info(f"[samsara] Crash detected — extending poll window to {max_attempts} attempts (~5 min)")
+                    # First response with a known type: let the caller persist + alert
+                    # before we keep waiting on the (possibly slow) video upload.
+                    if on_first is not None and not notified and harsh_type:
+                        notified = True
+                        try:
+                            await on_first(data)
+                        except Exception as e:
+                            logger.error(f"[samsara] on_first hook failed: {e}", exc_info=True)
                     fwd = data.get("downloadForwardVideoUrl") or ""
                     inward = data.get("downloadInwardVideoUrl") or ""
                     resolved_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "")
@@ -286,6 +300,19 @@ def _clean_vehicle(event: dict) -> str:
     return _strip_unit_prefix(_get_vehicle(event))[:50]
 
 
+def _vehicle_code_line(vehicle: str) -> str:
+    """Render a vehicle string as Telegram <code> spans — unit-prefix stripped and
+    HTML-escaped. Shared by the full alert and the crash 'pending' alert so they
+    always format the vehicle identically."""
+    v = _strip_unit_prefix(vehicle)
+    if not v:
+        return "—"
+    if " " in v:
+        num, rest = v.split(" ", 1)
+        return f"<code>{html.escape(num)}</code> <code>{html.escape(rest)}</code>"
+    return f"<code>{html.escape(v)}</code>"
+
+
 def _format_event(event: dict, company_name: str = "") -> str:
     event_type = _get_event_type(event)
     emoji, title = EVENT_TYPE_MAP.get(event_type, ("🚨", event_type.upper().replace("_", " ")))
@@ -315,13 +342,7 @@ def _format_event(event: dict, company_name: str = "") -> str:
     lines = [f"{emoji} <b>{html.escape(title)}</b>\n"]
     if company_name and event_type == "crash":
         lines.append(html.escape(company_name))
-    v = _strip_unit_prefix(vehicle)
-    if " " in v:
-        num, rest = v.split(" ", 1)
-        vehicle_fmt = f"<code>{html.escape(num)}</code> <code>{html.escape(rest)}</code>"
-    else:
-        vehicle_fmt = f"<code>{html.escape(v)}</code>" if v else "—"
-    lines.append(vehicle_fmt)
+    lines.append(_vehicle_code_line(vehicle))
     if driver and driver != "Unidentified":
         lines.append(f"👤 <b>Driver:</b> {html.escape(driver)}")
     if sev_display and event_type not in {"driver_facing_cam_obstruction", "road_facing_cam_obstruction"}:
@@ -369,14 +390,73 @@ def _get_camera_media_info(event: dict) -> tuple[list[str], list[str]]:
     return video_urls, image_urls
 
 
+def _parse_occurred(event: dict) -> datetime:
+    """Best-effort UTC occurrence time; falls back to now() on a bad/absent timestamp.
+    Shared so the early (first-poll) save and any later save agree on the row."""
+    s = event.get("start_time") or event.get("created_at") or ""
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return datetime.now()
+
+
+def _event_severity(event: dict) -> str | None:
+    """Normalized severity (metadata.severity → severity), lowercased, or None."""
+    meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
+    return meta_sev or (event.get("severity") or "").strip().lower() or None
+
+
+def _format_crash_pending(event: dict) -> str:
+    """Short text alert sent the instant a crash is detected, before the video has
+    uploaded. The full card (with media) follows once the URLs resolve."""
+    lines = ["🚨 <b>Crash detected — video pending</b>", _vehicle_code_line(_get_vehicle(event))]
+    when = _to_et(event.get("start_time", ""))
+    if when:
+        lines.append(f"🕐 <b>Time:</b> {html.escape(when)}")
+    lines.append("\n<i>via Samsara · full details to follow</i>")
+    return "\n".join(lines)
+
+
 async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
     """Filter → format → send to Telegram."""
     company_slug = company_slug or config.COMPANY_SLUG
     try:
+        # Set once we persist the row at first poll response, so the post-poll save
+        # below is skipped (and to record what type we already committed).
+        persisted_type = None
+
         # Enrich Samsara AlertIncident events: fetch harsh event data (type, location, video)
         if event.get("_samsara_vehicle_id") and event.get("_samsara_timestamp_ms"):
+            async def _on_first(data: dict):
+                """Runs on the first poll response that carries a real type — i.e. ~20s
+                in, well before the video uploads. Persists the violation row now so a
+                mid-poll restart can't lose it, and for crashes sends the instant
+                'video pending' alert; the full card with media follows from the
+                main path once the URLs resolve."""
+                nonlocal persisted_type
+                rtype = _SAMSARA_HARSH_TYPE_MAP.get(data.get("harshEventType") or "", "harsh_event")
+                if rtype not in ALLOWED_TYPES:
+                    return  # type we'd filter out anyway — don't persist or alert
+                await save_violation(
+                    company_slug=company_slug,
+                    vehicle_number=_clean_vehicle(event),
+                    event_type=rtype,
+                    event_id=_event_id_to_bigint(event.get("id")),
+                    occurred_at=_parse_occurred(event),
+                    severity=_event_severity(event),
+                )
+                persisted_type = rtype
+                logger.info(f"[samsara] Persisted {rtype} early (id={event.get('id')}) before media resolved")
+                if rtype == "crash":
+                    targets = [*await get_groups_for_event(company_slug, "crash"),
+                               *await get_subscribed_admins("crash", company_slug)]
+                    pending = _format_crash_pending(event)
+                    for cid in targets:
+                        await _send_text(bot, cid, pending, retries=3, delay=5.0)
+                    logger.info(f"[samsara] Crash pending alert → {len(targets)} target(s) id={event.get('id')}")
+
             harsh_data = await _fetch_samsara_harsh_event(
-                event["_samsara_vehicle_id"], event["_samsara_timestamp_ms"]
+                event["_samsara_vehicle_id"], event["_samsara_timestamp_ms"], on_first=_on_first
             )
             if harsh_data is None:
                 logger.info(f"[samsara] API returned no data — skipping event id={event.get('id')}")
@@ -434,24 +514,17 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
 
         logger.info(f"Processing unit={_get_unit_num(event)} type={event_type} id={event_id} video={'yes' if event.get('camera_media') else 'no'}")
 
-        # Parse occurred_at
-        occurred_at_str = event.get("start_time") or event.get("created_at") or ""
-        try:
-            occurred_at = datetime.fromisoformat(occurred_at_str.replace("Z", "+00:00"))
-        except Exception:
-            occurred_at = datetime.now()
-
-        vehicle_number = _clean_vehicle(event)
-        meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
-        severity = meta_sev or (event.get("severity") or "").strip().lower() or None
-        await save_violation(
-            company_slug=company_slug,
-            vehicle_number=vehicle_number,
-            event_type=event_type,
-            event_id=_event_id_to_bigint(event.get("id")),
-            occurred_at=occurred_at,
-            severity=severity,
-        )
+        # Persist the violation, unless the first-poll hook already saved it. Same
+        # helpers as the hook so the row is identical either way.
+        if persisted_type is None:
+            await save_violation(
+                company_slug=company_slug,
+                vehicle_number=_clean_vehicle(event),
+                event_type=event_type,
+                event_id=_event_id_to_bigint(event.get("id")),
+                occurred_at=_parse_occurred(event),
+                severity=_event_severity(event),
+            )
 
         group_ids = await get_groups_for_event(company_slug, event_type)
         dm_ids = await get_subscribed_admins(event_type, company_slug)

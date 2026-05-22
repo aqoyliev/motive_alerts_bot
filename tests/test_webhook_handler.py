@@ -8,10 +8,12 @@ from utils.webhook_handler import (
     _SAMSARA_HARSH_TYPE_MAP,
     _clean_vehicle,
     _event_id_to_bigint,
+    _format_crash_pending,
     _format_event,
     _get_event_type,
     _get_vehicle,
     _samsara_signed_payload,
+    _vehicle_code_line,
     _verify_hmac,
 )
 
@@ -202,3 +204,27 @@ def test_inward_only_excludes_forward_facing_types():
     assert "hard_brake" not in _INWARD_ONLY_TYPES
     assert "crash" not in _INWARD_ONLY_TYPES
     assert "harsh_acceleration" not in _INWARD_ONLY_TYPES
+
+
+# ── _vehicle_code_line / _format_crash_pending ────────────────────────────────────
+
+def test_vehicle_code_line_strips_prefix_and_splits():
+    assert _vehicle_code_line("Unit 528609 DEYBI") == "<code>528609</code> <code>DEYBI</code>"
+
+def test_vehicle_code_line_single_token():
+    assert _vehicle_code_line("528609") == "<code>528609</code>"
+
+def test_vehicle_code_line_escapes():
+    assert _vehicle_code_line("A&B <c>") == "<code>A&amp;B</code> <code>&lt;c&gt;</code>"
+
+def test_vehicle_code_line_empty_is_dash():
+    assert _vehicle_code_line("") == "—"
+
+def test_format_crash_pending_has_title_vehicle_and_escapes():
+    event = {"vehicle": {"number": "Unit 528609 D & J"},
+             "start_time": "2026-04-29T09:15:31Z"}
+    out = _format_crash_pending(event)
+    assert "🚨 <b>Crash detected — video pending</b>" in out
+    assert "<code>528609</code>" in out
+    assert "D &amp; J" in out          # escaped, not raw &
+    assert "via Samsara" in out
