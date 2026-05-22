@@ -4,6 +4,8 @@ import hmac
 
 from utils.webhook_handler import (
     ALLOWED_TYPES,
+    _INWARD_ONLY_TYPES,
+    _SAMSARA_HARSH_TYPE_MAP,
     _clean_vehicle,
     _event_id_to_bigint,
     _format_event,
@@ -178,3 +180,25 @@ def test_samsara_raw_body_without_v1_prefix_fails():
     # Guards the regression: signing the raw body (the old scheme) must not pass.
     sig = _samsara_sign(_SECRET, _TS, _BODY)
     assert _verify_hmac(_SECRET, _BODY, sig) is False
+
+
+# ── Samsara harsh-event polling config ────────────────────────────────────────────
+
+def test_inward_only_types_are_producible_by_harsh_type_map():
+    # The inward-only short-circuit only fires when _SAMSARA_HARSH_TYPE_MAP resolves a
+    # Samsara harshEventType to one of these. If a type here can't be produced by the
+    # map, its branch is dead — keep them in sync.
+    producible = set(_SAMSARA_HARSH_TYPE_MAP.values())
+    missing = _INWARD_ONLY_TYPES - producible
+    assert not missing, f"inward-only types unreachable via harsh-type map: {missing}"
+
+def test_crash_maps_to_crash_so_poll_extension_triggers():
+    # _fetch_samsara_harsh_event extends the window on harshEventType == "Crash";
+    # the resolved type must be 'crash' for downstream routing to agree.
+    assert _SAMSARA_HARSH_TYPE_MAP["Crash"] == "crash"
+
+def test_inward_only_excludes_forward_facing_types():
+    # Forward-camera events must NOT short-circuit on the inward clip alone.
+    assert "hard_brake" not in _INWARD_ONLY_TYPES
+    assert "crash" not in _INWARD_ONLY_TYPES
+    assert "harsh_acceleration" not in _INWARD_ONLY_TYPES

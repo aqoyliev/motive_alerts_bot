@@ -139,6 +139,13 @@ _SAMSARA_HARSH_TYPE_MAP: dict[str, str] = {
     "Harsh Turn":          "harsh_turn",
 }
 
+# These event types are captured by the inward (driver-facing) camera only — there is
+# never a forward clip — so polling can return as soon as the inward URL is ready
+# instead of waiting the full window for a forward URL that never arrives.
+_INWARD_ONLY_TYPES: frozenset[str] = frozenset(
+    {"cell_phone", "drowsy_driving", "no_seat_belt", "inattentive_driving"}
+)
+
 
 def _kph_to_mph(kph: float) -> float:
     return kph * 0.621371
@@ -170,41 +177,59 @@ def _samsara_signed_payload(timestamp: str, body: bytes) -> bytes:
 
 
 async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict | None:
-    """Poll harsh event API every 20s for up to 2 minutes, waiting for both video URLs."""
+    """Poll harsh event API waiting for video URLs. Every attempt waits 20s first.
+
+    Standard harsh events: up to 3 attempts (~60s).
+    Crashes: once detected, the window extends to 15 attempts (~5 min) with no
+    early-bail — crash clips are large and take a few minutes to upload.
+    Inward-only types short-circuit as soon as the inward clip is ready."""
     url = f"https://api.samsara.com/v1/fleet/vehicles/{vehicle_id}/safety/harsh_event"
     headers = {"Authorization": f"Bearer {config.SAMSARA_API_KEY}"}
     last_data = None
     ever_got_url = False
-    for attempt in range(1, 7):
+    is_crash = False
+    max_attempts = 3  # bumped to 15 once a Crash is detected
+    attempt = 0
+    while attempt < max_attempts:
+        attempt += 1
         await asyncio.sleep(20)
         try:
             async with _http_session.get(url, headers=headers, params={"timestamp": timestamp_ms}) as r:
                 if r.status == 200:
                     data = await r.json()
                     last_data = data
-                    # logger.info(f"[samsara] harsh_event API response (attempt {attempt}):\n{json.dumps(data, indent=2)}")
                     harsh_type = data.get("harshEventType") or ""
                     if harsh_type == "Obstructed Camera":
                         logger.info(f"[samsara] Obstructed Camera — skipping event")
                         return None
+                    if harsh_type == "Crash" and not is_crash:
+                        is_crash = True
+                        max_attempts = 15  # ~5 min total at 20s intervals
+                        logger.info(f"[samsara] Crash detected — extending poll window to {max_attempts} attempts (~5 min)")
                     fwd = data.get("downloadForwardVideoUrl") or ""
                     inward = data.get("downloadInwardVideoUrl") or ""
+                    resolved_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "")
                     if fwd and inward:
-                        logger.info(f"[samsara] Both video URLs ready on attempt {attempt}")
+                        logger.info(f"[samsara] Both video URLs ready on attempt {attempt} (type={harsh_type})")
+                        return data
+                    if resolved_type in _INWARD_ONLY_TYPES and inward:
+                        logger.info(f"[samsara] Inward-only type '{resolved_type}' ready on attempt {attempt} — short-circuit")
                         return data
                     if fwd or inward:
                         ever_got_url = True
-                    if attempt >= 3 and not ever_got_url:
+                    # Crashes wait the full window; others bail on the last attempt if nothing came.
+                    if not is_crash and attempt == max_attempts and not ever_got_url:
                         logger.warning(f"[samsara] No URLs after {attempt} attempts — sending with no media")
                         return last_data
-                    logger.info(f"[samsara] Attempt {attempt}/6: fwd={bool(fwd)} inward={bool(inward)} — retrying in 20s")
+                    tail = " — retrying in 20s" if attempt < max_attempts else ""
+                    logger.info(f"[samsara] Attempt {attempt}/{max_attempts} type={resolved_type or 'unknown'}: fwd={bool(fwd)} inward={bool(inward)}{tail}")
                 else:
                     body_text = await r.text()
                     logger.error(f"[samsara] harsh_event API HTTP {r.status} on attempt {attempt} — giving up")
                     return None
         except Exception as e:
             logger.error(f"[samsara] harsh_event API error attempt {attempt}: {e}")
-    logger.warning("[samsara] Gave up after 6 attempts — sending with available URLs")
+    logger.warning(f"[samsara] Gave up after {attempt} attempts (crash={is_crash}) — sending with available URLs")
     return last_data
 
 
