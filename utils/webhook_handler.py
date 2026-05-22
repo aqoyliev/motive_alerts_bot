@@ -427,6 +427,10 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
         # Set once a crash's full details have been sent at first detection, so the
         # main path knows to follow up with only the video (short caption).
         crash_card_sent = False
+        # Whether that first crash alert already carried the location. If not (it can
+        # lag the type), the video follow-up upgrades to the full caption so the
+        # location still reaches recipients.
+        crash_first_had_location = False
 
         # Enrich Samsara AlertIncident events: fetch harsh event data (type, location, video)
         if event.get("_samsara_vehicle_id") and event.get("_samsara_timestamp_ms"):
@@ -437,15 +441,15 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
                 details immediately (text), to groups and DMs alike, so everyone has the
                 complete record even if no video ever resolves; the video then follows
                 from the main path as a short-captioned clip."""
-                nonlocal persisted_type, crash_card_sent
+                nonlocal persisted_type, crash_card_sent, crash_first_had_location
                 rtype = _SAMSARA_HARSH_TYPE_MAP.get(data.get("harshEventType") or "", "harsh_event")
                 if rtype not in ALLOWED_TYPES:
                     return  # type we'd filter out anyway — don't persist or alert
                 # Enrich from the first response (type + location are known now; video
                 # isn't) so the full card is complete apart from the clip.
-                loc = (data.get("location") or {})
+                first_loc = (data.get("location") or {}).get("address") or ""
                 first_event = {**event, "type": rtype,
-                               "location": loc.get("address") or "", "camera_media": None}
+                               "location": first_loc, "camera_media": None}
                 await save_violation(
                     company_slug=company_slug,
                     vehicle_number=_clean_vehicle(first_event),
@@ -463,6 +467,7 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
                     for cid in targets:
                         await _send_text(bot, cid, text, retries=3, delay=5.0)
                     crash_card_sent = True
+                    crash_first_had_location = bool(first_loc)
                     logger.info(f"[samsara] Crash full alert → {len(targets)} target(s) id={event.get('id')}")
 
             harsh_data = await _fetch_samsara_harsh_event(
@@ -569,7 +574,13 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
             if not media:
                 logger.info(f"[samsara] Crash had no media — full alert already sent, no follow-up id={event_id}")
                 return
-            text = _format_crash_video_caption(event)
+            if not crash_first_had_location and event.get("location"):
+                # The location wasn't ready for the first alert but is now — send the
+                # full card as the video caption so recipients still get it.
+                logger.info(f"[samsara] Location resolved after first crash alert — using full caption id={event_id}")
+                text = _format_event(event)
+            else:
+                text = _format_crash_video_caption(event)
         else:
             text = _format_event(event)
             if not video_urls and not image_urls and event.get("camera_media") is None and event_type != "speeding":

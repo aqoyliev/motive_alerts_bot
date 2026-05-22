@@ -169,9 +169,11 @@ async def test_handle_event_crash_full_alert_first_then_video(monkeypatch):
     assert {cid for cid, _ in sent_text} == {111, 222}
     assert all("CRASH DETECTED" in t for _, t in sent_text)
     assert all("I-95 N" in t for _, t in sent_text)        # full card has the location
-    # SECOND message: the video, short caption, to both targets
+    # SECOND message: the video, SHORT caption (first alert already had the location),
+    # to both targets
     assert send_full.await_count == 2
-    assert all("💥 <b>CRASH</b>" in c.args[2] for c in send_full.await_args_list)
+    assert all("💥 <b>CRASH</b>" in c.args[2] and "DETECTED" not in c.args[2]
+               for c in send_full.await_args_list)
 
 async def test_handle_event_noncrash_persists_early_without_pending(monkeypatch):
     save, sent_text, send_full = _patch_handle_event_deps(monkeypatch, groups=[111], dms=[])
@@ -185,6 +187,24 @@ async def test_handle_event_noncrash_persists_early_without_pending(monkeypatch)
     assert save.await_args.kwargs["event_type"] == "hard_brake"
     assert sent_text == []          # non-crash → no early alert
     assert send_full.await_count == 1
+
+async def test_handle_event_crash_video_caption_falls_back_to_full_when_location_late(monkeypatch):
+    save, sent_text, send_full = _patch_handle_event_deps(monkeypatch, groups=[111], dms=[222])
+    # attempt 1: Crash, NO location yet (first alert can't include it)
+    # attempt 2: Crash, both URLs + location now present
+    r1 = _resp(json_data={"harshEventType": "Crash"})
+    r2 = _resp(json_data={"harshEventType": "Crash", "downloadForwardVideoUrl": "f",
+                          "downloadInwardVideoUrl": "i", "location": {"address": "I-95 N"}})
+    monkeypatch.setattr(wh, "_http_session", _session([r1, r2]))
+
+    await wh._handle_event(MagicMock(), _samsara_event(), company_slug="hf")
+
+    # First alert went out WITHOUT the location...
+    assert all("I-95 N" not in t for _, t in sent_text)
+    # ...so the video follow-up upgrades to the full caption to deliver it.
+    assert send_full.await_count == 2
+    assert all("I-95 N" in c.args[2] and "CRASH DETECTED" in c.args[2]
+               for c in send_full.await_args_list)
 
 async def test_handle_event_crash_no_media_full_alert_to_all_no_followup(monkeypatch):
     save, sent_text, send_full = _patch_handle_event_deps(monkeypatch, groups=[111], dms=[222])
