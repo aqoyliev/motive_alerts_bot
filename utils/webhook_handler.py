@@ -404,15 +404,17 @@ def _event_severity(event: dict) -> str | None:
     return meta_sev or (event.get("severity") or "").strip().lower() or None
 
 
-def _format_crash_pending(event: dict) -> str:
-    """Short text alert sent the instant a crash is detected, before the video has
-    uploaded. The full card (with media) follows once the URLs resolve."""
-    lines = ["🚨 <b>Crash detected — video pending</b>", _vehicle_code_line(_get_vehicle(event))]
-    when = _to_et(event.get("start_time", ""))
-    if when:
-        lines.append(f"🕐 <b>Time:</b> {html.escape(when)}")
-    lines.append("\n<i>via Samsara · full details to follow</i>")
-    return "\n".join(lines)
+def _format_crash_initial(event: dict) -> str:
+    """First crash alert: the FULL details, sent the instant the crash is detected —
+    before the video uploads. Everyone (groups and DMs) gets this, so the complete
+    record is delivered even when no video ever resolves."""
+    return _format_event(event) + "\n\n📹 <i>Video to follow if available</i>"
+
+
+def _format_crash_video_caption(event: dict) -> str:
+    """Short caption for the crash video follow-up — the full details already went out
+    in the first alert, so this just labels the clip."""
+    return f"💥 <b>CRASH</b> — {_vehicle_code_line(_get_vehicle(event))}"
 
 
 async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
@@ -422,36 +424,46 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
         # Set once we persist the row at first poll response, so the post-poll save
         # below is skipped (and to record what type we already committed).
         persisted_type = None
+        # Set once a crash's full details have been sent at first detection, so the
+        # main path knows to follow up with only the video (short caption).
+        crash_card_sent = False
 
         # Enrich Samsara AlertIncident events: fetch harsh event data (type, location, video)
         if event.get("_samsara_vehicle_id") and event.get("_samsara_timestamp_ms"):
             async def _on_first(data: dict):
                 """Runs on the first poll response that carries a real type — i.e. ~20s
                 in, well before the video uploads. Persists the violation row now so a
-                mid-poll restart can't lose it, and for crashes sends the instant
-                'video pending' alert; the full card with media follows from the
-                main path once the URLs resolve."""
-                nonlocal persisted_type
+                mid-poll restart can't lose it. For crashes it ALSO sends the full
+                details immediately (text), to groups and DMs alike, so everyone has the
+                complete record even if no video ever resolves; the video then follows
+                from the main path as a short-captioned clip."""
+                nonlocal persisted_type, crash_card_sent
                 rtype = _SAMSARA_HARSH_TYPE_MAP.get(data.get("harshEventType") or "", "harsh_event")
                 if rtype not in ALLOWED_TYPES:
                     return  # type we'd filter out anyway — don't persist or alert
+                # Enrich from the first response (type + location are known now; video
+                # isn't) so the full card is complete apart from the clip.
+                loc = (data.get("location") or {})
+                first_event = {**event, "type": rtype,
+                               "location": loc.get("address") or "", "camera_media": None}
                 await save_violation(
                     company_slug=company_slug,
-                    vehicle_number=_clean_vehicle(event),
+                    vehicle_number=_clean_vehicle(first_event),
                     event_type=rtype,
                     event_id=_event_id_to_bigint(event.get("id")),
-                    occurred_at=_parse_occurred(event),
-                    severity=_event_severity(event),
+                    occurred_at=_parse_occurred(first_event),
+                    severity=_event_severity(first_event),
                 )
                 persisted_type = rtype
                 logger.info(f"[samsara] Persisted {rtype} early (id={event.get('id')}) before media resolved")
                 if rtype == "crash":
                     targets = [*await get_groups_for_event(company_slug, "crash"),
                                *await get_subscribed_admins("crash", company_slug)]
-                    pending = _format_crash_pending(event)
+                    text = _format_crash_initial(first_event)
                     for cid in targets:
-                        await _send_text(bot, cid, pending, retries=3, delay=5.0)
-                    logger.info(f"[samsara] Crash pending alert → {len(targets)} target(s) id={event.get('id')}")
+                        await _send_text(bot, cid, text, retries=3, delay=5.0)
+                    crash_card_sent = True
+                    logger.info(f"[samsara] Crash full alert → {len(targets)} target(s) id={event.get('id')}")
 
             harsh_data = await _fetch_samsara_harsh_event(
                 event["_samsara_vehicle_id"], event["_samsara_timestamp_ms"], on_first=_on_first
@@ -532,12 +544,7 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
             logger.info(f"No targets for company='{company_slug}' event='{event_type}' — skipping")
             return
 
-        text = _format_event(event)
         video_urls, image_urls = _get_camera_media_info(event)
-
-        if not video_urls and not image_urls and event.get("camera_media") is None and event_type != "speeding":
-            text += "\n\n📷 <i>No camera media available</i>"
-
         is_video = bool(video_urls)
         media_urls = video_urls or image_urls or []
         size_limit = _MAX_VIDEO_BYTES if is_video else _MAX_PHOTO_BYTES
@@ -555,28 +562,27 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
             logger.info(f"Downloaded {len(data)} bytes for media_{i+1}")
             media.append(data)
 
+        if crash_card_sent:
+            # The full details already went out at first detection (to everyone). The
+            # follow-up is ONLY the video, with a short caption. With no media there's
+            # nothing left to send — recipients already have the complete card.
+            if not media:
+                logger.info(f"[samsara] Crash had no media — full alert already sent, no follow-up id={event_id}")
+                return
+            text = _format_crash_video_caption(event)
+        else:
+            text = _format_event(event)
+            if not video_urls and not image_urls and event.get("camera_media") is None and event_type != "speeding":
+                text += "\n\n📷 <i>No camera media available</i>"
+
         # Upload the media once, then reuse the returned Telegram file_id for every other
         # recipient instead of re-uploading the same (potentially large) clip N times.
-        # Groups go first so the file_id exists before DMs reuse it.
         sent_file_ids = None
-        for chat_id in group_ids:
+        for chat_id in [*group_ids, *dm_ids]:
             payload = sent_file_ids if sent_file_ids is not None else media
             result = await _send_with_retry(bot, chat_id, text, is_video, payload)
             if result and sent_file_ids is None:
                 sent_file_ids = result
-
-        # For a crash we already DM'd an instant "video pending" alert. If no media ever
-        # resolved, the follow-up is just text — skip it for DMs so private chats aren't
-        # double-texted. Groups still get the fuller card (it adds the location).
-        skip_dm_followup = persisted_type == "crash" and not media
-        if skip_dm_followup and dm_ids:
-            logger.info(f"[samsara] Crash had no media — skipping text-only follow-up for {len(dm_ids)} DM(s)")
-        else:
-            for telegram_id in dm_ids:
-                payload = sent_file_ids if sent_file_ids is not None else media
-                result = await _send_with_retry(bot, telegram_id, text, is_video, payload)
-                if result and sent_file_ids is None:
-                    sent_file_ids = result
 
     except Exception as e:
         logger.error(f"Event handling error: {e}", exc_info=True)

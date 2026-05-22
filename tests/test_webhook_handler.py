@@ -8,7 +8,8 @@ from utils.webhook_handler import (
     _SAMSARA_HARSH_TYPE_MAP,
     _clean_vehicle,
     _event_id_to_bigint,
-    _format_crash_pending,
+    _format_crash_initial,
+    _format_crash_video_caption,
     _format_event,
     _get_event_type,
     _get_vehicle,
@@ -220,11 +221,22 @@ def test_vehicle_code_line_escapes():
 def test_vehicle_code_line_empty_is_dash():
     assert _vehicle_code_line("") == "—"
 
-def test_format_crash_pending_has_title_vehicle_and_escapes():
-    event = {"vehicle": {"number": "Unit 528609 D & J"},
+def test_format_crash_initial_is_full_card_plus_video_note():
+    # The first crash message carries the FULL details (so no-media crashes still
+    # inform everyone), plus a hint that the video may follow.
+    event = {"type": "crash", "_source": "samsara",
+             "vehicle": {"number": "Unit 528609 D & J"},
+             "location": "I-95 N & Exit 12",
              "start_time": "2026-04-29T09:15:31Z"}
-    out = _format_crash_pending(event)
-    assert "🚨 <b>Crash detected — video pending</b>" in out
+    out = _format_crash_initial(event)
+    assert "💥 <b>CRASH DETECTED</b>" in out      # full card title
     assert "<code>528609</code>" in out
-    assert "D &amp; J" in out          # escaped, not raw &
-    assert "via Samsara" in out
+    assert "📍 <b>Location:</b> I-95 N &amp; Exit 12" in out
+    assert "D &amp; J" in out                      # escaped
+    assert "Video to follow" in out
+
+def test_format_crash_video_caption_is_short():
+    event = {"vehicle": {"number": "Unit 528609 D & J"}}
+    out = _format_crash_video_caption(event)
+    assert out == "💥 <b>CRASH</b> — <code>528609</code> <code>D &amp; J</code>"
+    assert "Location" not in out                   # the detail lives in the first alert

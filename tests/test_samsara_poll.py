@@ -151,11 +151,11 @@ def _samsara_event():
         "start_time": "2026-04-29T09:15:31Z",
     }
 
-async def test_handle_event_crash_persists_early_and_sends_pending(monkeypatch):
+async def test_handle_event_crash_full_alert_first_then_video(monkeypatch):
     save, sent_text, send_full = _patch_handle_event_deps(monkeypatch, groups=[111], dms=[222])
-    # attempt 1: Crash, no media (fires hook → early save + pending)
-    # attempt 2: Crash, both URLs (full card follows)
-    r1 = _resp(json_data={"harshEventType": "Crash"})
+    # attempt 1: Crash, no media (fires hook → early save + FULL text alert)
+    # attempt 2: Crash, both URLs (video follow-up)
+    r1 = _resp(json_data={"harshEventType": "Crash", "location": {"address": "I-95 N"}})
     r2 = _resp(json_data={"harshEventType": "Crash", "downloadForwardVideoUrl": "f",
                           "downloadInwardVideoUrl": "i", "location": {"address": "I-95 N"}})
     monkeypatch.setattr(wh, "_http_session", _session([r1, r2]))
@@ -165,11 +165,13 @@ async def test_handle_event_crash_persists_early_and_sends_pending(monkeypatch):
     # persisted exactly once, as a crash, before the poll finished
     save.assert_awaited_once()
     assert save.await_args.kwargs["event_type"] == "crash"
-    # pending alert went to both crash targets
+    # FIRST message: full details to both targets (not a bare "pending" line)
     assert {cid for cid, _ in sent_text} == {111, 222}
-    assert all("Crash detected — video pending" in t for _, t in sent_text)
-    # full card delivered to both targets afterward
+    assert all("CRASH DETECTED" in t for _, t in sent_text)
+    assert all("I-95 N" in t for _, t in sent_text)        # full card has the location
+    # SECOND message: the video, short caption, to both targets
     assert send_full.await_count == 2
+    assert all("💥 <b>CRASH</b>" in c.args[2] for c in send_full.await_args_list)
 
 async def test_handle_event_noncrash_persists_early_without_pending(monkeypatch):
     save, sent_text, send_full = _patch_handle_event_deps(monkeypatch, groups=[111], dms=[])
@@ -181,19 +183,20 @@ async def test_handle_event_noncrash_persists_early_without_pending(monkeypatch)
 
     save.assert_awaited_once()
     assert save.await_args.kwargs["event_type"] == "hard_brake"
-    assert sent_text == []          # non-crash → no pending alert
+    assert sent_text == []          # non-crash → no early alert
     assert send_full.await_count == 1
 
-async def test_handle_event_crash_no_media_skips_dm_followup(monkeypatch):
+async def test_handle_event_crash_no_media_full_alert_to_all_no_followup(monkeypatch):
     save, sent_text, send_full = _patch_handle_event_deps(monkeypatch, groups=[111], dms=[222])
     # Crash that never produces a clip → polls the full window, no media.
-    monkeypatch.setattr(wh, "_http_session", _session([_resp(json_data={"harshEventType": "Crash"})]))
+    monkeypatch.setattr(wh, "_http_session",
+                        _session([_resp(json_data={"harshEventType": "Crash", "location": {"address": "I-95 N"}})]))
 
     await wh._handle_event(MagicMock(), _samsara_event(), company_slug="hf")
 
-    # Instant pending alert still reached both crash targets.
+    # Full details reached BOTH groups and DMs at first detection — admins are informed
+    # even with no video.
     assert {cid for cid, _ in sent_text} == {111, 222}
-    # Media-less follow-up: group gets it (adds location), DM is skipped.
-    called_chats = {c.args[1] for c in send_full.await_args_list}
-    assert called_chats == {111}
-    assert send_full.await_count == 1
+    assert all("CRASH DETECTED" in t and "I-95 N" in t for _, t in sent_text)
+    # No video → no second message to anyone (full card already delivered).
+    assert send_full.await_count == 0
