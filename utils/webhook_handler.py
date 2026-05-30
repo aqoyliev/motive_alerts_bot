@@ -566,14 +566,14 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
                 persisted_type = rtype
                 logger.info(f"[samsara] Persisted {rtype} early (id={event.get('id')}) before media resolved")
                 if rtype == "crash":
-                    targets = [*await get_groups_for_event(company_slug, "crash"),
-                               *await get_subscribed_admins("crash", company_slug)]
+                    # Crash alerts go to subscribed DMs only — never to groups.
+                    targets = await get_subscribed_admins("crash", company_slug)
                     text = _format_crash_initial(first_event, company_display)
                     for cid in targets:
                         await _send_with_retry(bot, cid, text)
                     crash_card_sent = True
                     crash_first_had_location = bool(first_loc)
-                    logger.info(f"[samsara] Crash full alert → {len(targets)} target(s) id={event.get('id')}")
+                    logger.info(f"[samsara] Crash full alert → {len(targets)} DM target(s) id={event.get('id')}")
 
             harsh_data = await _fetch_samsara_harsh_event(
                 event["_samsara_vehicle_id"], event["_samsara_timestamp_ms"],
@@ -649,6 +649,9 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
 
         group_ids = await get_groups_for_event(company_slug, event_type)
         dm_ids = await get_subscribed_admins(event_type, company_slug)
+        if event_type == "crash":
+            # Crash alerts go to subscribed DMs only — never to groups.
+            group_ids = []
         if not group_ids and not dm_ids:
             logger.info(f"No targets for company='{company_slug}' event='{event_type}' — skipping")
             return
